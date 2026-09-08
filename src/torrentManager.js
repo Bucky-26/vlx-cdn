@@ -67,6 +67,13 @@ function prioritizeTorrentWindow(torrentData, targetPiece = 0, rushCount = 15, f
             }
         }
 
+        // If jumping forward, cancel pieces before the seek point (preserving headers 0..3)
+        if (targetPiece > 6 && torrent.deselect) {
+            try {
+                torrent.deselect(4, targetPiece - 1);
+            } catch (e) {}
+        }
+
         // 2. Immediate rush pieces (critical hotswap)
         if (torrent.critical && start <= rushEnd) {
             torrent.critical(start, rushEnd);
@@ -94,10 +101,10 @@ function cleanStaleTorrents(activeInfoHash) {
     for (const t of [...client.torrents]) {
         const hash = (t.infoHash || "").toLowerCase();
         if (hash !== currentKey) {
-            console.log("Removing background torrent to maximize bandwidth:", t.name || hash);
+            console.log("Removing background torrent to maximize bandwidth and disk space:", t.name || hash);
             try {
                 torrents.delete(hash);
-                client.remove(t);
+                client.remove(t, { destroyStore: true });
             } catch (e) {}
         }
     }

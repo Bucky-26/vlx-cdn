@@ -59,7 +59,7 @@ router.get("/search", async (req, res) => {
 });
 
 router.post("/torrent", async (req, res) => {
-    const { magnet } = req.body;
+    const { magnet, duration } = req.body;
 
     if (!magnet || !magnet.startsWith("magnet:?")) {
         return res.status(400).json({ error: "Invalid magnet link" });
@@ -75,6 +75,9 @@ router.post("/torrent", async (req, res) => {
     // Already cached in torrents map
     if (hasTorrent(infoHash)) {
         const data = getTorrentData(infoHash);
+        if (duration && (!data.duration || data.duration <= 0)) {
+            data.duration = Number(duration);
+        }
         return res.json({
             filename: data.file.name,
             streamUrl: `/stream/${infoHash}`,
@@ -118,7 +121,7 @@ router.post("/torrent", async (req, res) => {
         const torrentData = {
             torrent,
             file,
-            duration: 0,
+            duration: Number(duration) || 0,
             currentPiece: file._startPiece || 0,
             lastBufferedPiece: file._startPiece || 0
         };
@@ -184,6 +187,7 @@ router.post("/torrent", async (req, res) => {
     }, 30000);
 
     const torrentOpts = {
+        destroyStoreOnDestroy: true, // Automatically free disk space when torrent is removed
         deselect: true, // Prevents downloading arbitrary pieces from the entire file
         strategy: "sequential", // Request blocks sequentially
         maxConns: 150, // Dedicated peer connection pool

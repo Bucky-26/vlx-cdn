@@ -234,7 +234,8 @@ video.addEventListener("timeupdate", () => {
 });
 
 video.addEventListener("loadedmetadata", () => {
-    if (isFinite(video.duration) && video.duration > 0 && !hasProbedDuration) {
+    // Only accept browser video.duration if NOT transcoding and duration is a plausible full movie/show duration (> 5 min)
+    if (!isAudioTranscode && isFinite(video.duration) && video.duration > 300) {
         totalDuration = video.duration;
     }
     updateProgressUI();
@@ -242,7 +243,8 @@ video.addEventListener("loadedmetadata", () => {
 });
 
 video.addEventListener("durationchange", () => {
-    if (isFinite(video.duration) && video.duration > 0 && !hasProbedDuration) {
+    // Fragmented MP4 in transcode mode reports incremental chunk lengths; do not overwrite total movie/episode duration!
+    if (!isAudioTranscode && isFinite(video.duration) && video.duration > 300) {
         totalDuration = video.duration;
     }
     updateProgressUI();
@@ -508,7 +510,7 @@ async function startStreamForTorrent(torrent) {
         const res = await fetch("/api/torrent", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ magnet: torrent.magnet })
+            body: JSON.stringify({ magnet: torrent.magnet, duration: totalDuration })
         });
 
         const data = await res.json();
@@ -658,9 +660,9 @@ async function initPlayer() {
         currentTorrents.forEach((t, i) => {
             const opt = document.createElement("option");
             opt.value = i;
-            const bestTag = i === 0 ? " [Best - Most Peers]" : "";
-            const totalPeers = (t.seeders || 0) + (t.leechers || 0);
-            opt.innerText = `Server ${i + 1}${bestTag}: ${t.seeders} seeds (${totalPeers} peers) • ${t.sizeFormatted}`;
+            const bestTag = i === 0 ? " [Best]" : "";
+            const provTag = t.provider ? ` [${t.provider}]` : "";
+            opt.innerText = `Server ${i + 1}${bestTag}: ${t.seeders} seeds${provTag} • ${t.sizeFormatted}`;
             serverSelect.appendChild(opt);
         });
 

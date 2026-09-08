@@ -49,6 +49,10 @@ router.get("/:infoHash", (req, res) => {
             ffmpegArgs = [
                 "-loglevel", "warning",
                 "-threads", "0",
+                "-seekable", "1",
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "2",
                 "-analyzeduration", "1000000",
                 "-probesize", "1000000",
                 "-fflags", "+fastseek+nobuffer",

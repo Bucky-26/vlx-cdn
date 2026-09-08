@@ -70,9 +70,10 @@ async function getTvEpisodeInfo(tmdbId, season, episode) {
     const cached = getCached(cacheKey);
     if (cached) return cached;
 
-    const [tvData, epData] = await Promise.all([
+    const [tvData, epData, extData] = await Promise.all([
         tmdbFetch(`/tv/${tmdbId}`),
-        tmdbFetch(`/tv/${tmdbId}/season/${season}/episode/${episode}`)
+        tmdbFetch(`/tv/${tmdbId}/season/${season}/episode/${episode}`),
+        tmdbFetch(`/tv/${tmdbId}/external_ids`).catch(() => ({}))
     ]);
 
     const result = {
@@ -83,6 +84,7 @@ async function getTvEpisodeInfo(tmdbId, season, episode) {
         episode: parseInt(episode, 10),
         episodeTitle: epData.name || `Episode ${episode}`,
         airDate: epData.air_date || null,
+        imdbId: extData.imdb_id || null,
         overview: epData.overview || tvData.overview || "",
         voteAverage: epData.vote_average
             ? parseFloat(epData.vote_average.toFixed(1))
@@ -100,6 +102,7 @@ async function getTvEpisodeInfo(tmdbId, season, episode) {
     return result;
 }
 
+// Provider 1: Apibay (The Pirate Bay)
 async function searchApibay(query) {
     try {
         let url = `https://apibay.org/q.php?q=${encodeURIComponent(query.trim())}&cat=200`;
@@ -131,13 +134,110 @@ async function searchApibay(query) {
                 leechers,
                 size,
                 sizeFormatted: formatBytes(size),
+                provider: "ThePirateBay",
                 magnet,
                 streamUrl: `/stream/${hash}`,
                 transcodeUrl: `/stream/${hash}?transcode=audio`
             };
         });
     } catch (e) {
-        console.error("Search error for query:", query, e.message);
+        console.error("Apibay search error:", e.message);
+        return [];
+    }
+}
+
+// Provider 2: Torrentio Multi-Provider Scraper (TorrentGalaxy, 1337x, RARBG, etc.)
+async function searchTorrentio(type, id) {
+    if (!id) return [];
+    try {
+        const url = type === "series"
+            ? `https://torrentio.strem.fun/stream/series/${id}.json`
+            : `https://torrentio.strem.fun/stream/movie/${id}.json`;
+
+        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) return [];
+        const data = await res.json();
+        const streams = data.streams || [];
+
+        return streams.map((s) => {
+            const titleLines = (s.title || "").split("\n");
+            const filename = s.behaviorHints?.filename || titleLines[0];
+            const hash = (s.infoHash || "").toLowerCase();
+            const seedMatch = (s.title || "").match(/👤\s*(\d+)/);
+            const sizeMatch = (s.title || "").match(/💾\s*([0-9.]+)\s*([KMGT]?B)/i);
+            const provMatch = (s.title || "").match(/⚙️\s*([^\n]+)/);
+
+            let sizeBytes = 0;
+            if (sizeMatch) {
+                const num = parseFloat(sizeMatch[1]);
+                const unit = sizeMatch[2].toUpperCase();
+                const mult = unit === "GB" ? 1073741824 : unit === "MB" ? 1048576 : 1024;
+                sizeBytes = Math.round(num * mult);
+            }
+
+            const provider = provMatch ? provMatch[1].trim() : "Torrentio";
+            const seeders = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+            const magnet = buildMagnet(hash, filename);
+
+            return {
+                id: hash,
+                name: filename,
+                infoHash: hash,
+                seeders,
+                leechers: 0,
+                size: sizeBytes,
+                sizeFormatted: formatBytes(sizeBytes),
+                provider,
+                magnet,
+                streamUrl: `/stream/${hash}`,
+                transcodeUrl: `/stream/${hash}?transcode=audio`
+            };
+        }).filter((item) => item.infoHash && item.name);
+    } catch (e) {
+        console.error("Torrentio search error:", e.message);
+        return [];
+    }
+}
+
+// Provider 3: YTS / YIFY (Fast Web MP4 Movies)
+async function searchYts(query) {
+    if (!query) return [];
+    try {
+        const url = `https://yts.bz/api/v2/list_movies.json?query_term=${encodeURIComponent(query.trim())}&limit=10`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+        if (!res.ok) return [];
+        const data = await res.json();
+        const movies = data.data?.movies || [];
+        const results = [];
+
+        for (const m of movies) {
+            if (!m.torrents) continue;
+            for (const t of m.torrents) {
+                const hash = (t.hash || "").toLowerCase();
+                const filename = `${m.title} (${m.year}) [${t.quality || "1080p"}] [YTS]`;
+                const seeders = parseInt(t.seeds, 10) || 0;
+                const leechers = parseInt(t.peers, 10) || 0;
+                const size = t.size_bytes || 0;
+                const magnet = buildMagnet(hash, filename);
+
+                results.push({
+                    id: hash,
+                    name: filename,
+                    infoHash: hash,
+                    seeders,
+                    leechers,
+                    size,
+                    sizeFormatted: formatBytes(size),
+                    provider: "YTS",
+                    magnet,
+                    streamUrl: `/stream/${hash}`,
+                    transcodeUrl: `/stream/${hash}?transcode=audio`
+                });
+            }
+        }
+        return results;
+    } catch (e) {
+        console.error("YTS search error:", e.message);
         return [];
     }
 }
@@ -285,23 +385,38 @@ async function searchMovieTorrents(movie) {
     const seen = new Set();
     const results = [];
 
-    // 1. Try with title and year
-    if (movie.year) {
-        const query = `${movie.title} ${movie.year}`;
-        const items = await searchApibay(query);
-        for (const item of items) {
-            if (!seen.has(item.infoHash)) {
-                seen.add(item.infoHash);
-                results.push(item);
+    // Parallel multi-provider search: Torrentio + Apibay + YTS
+    const queries = [];
+
+    // 1. Torrentio (aggregates TorrentGalaxy, 1337x, RARBG, etc.)
+    if (movie.imdbId) {
+        queries.push(searchTorrentio("movie", movie.imdbId));
+    }
+
+    // 2. Apibay (The Pirate Bay)
+    const titleQuery = movie.year ? `${movie.title} ${movie.year}` : movie.title;
+    queries.push(searchApibay(titleQuery));
+
+    // 3. YTS (Fast Web MP4)
+    queries.push(searchYts(movie.title));
+
+    const settled = await Promise.allSettled(queries);
+    for (const res of settled) {
+        if (res.status === "fulfilled" && Array.isArray(res.value)) {
+            for (const item of res.value) {
+                if (item.infoHash && !seen.has(item.infoHash)) {
+                    seen.add(item.infoHash);
+                    results.push(item);
+                }
             }
         }
     }
 
-    // 2. If few results, fallback to title only
-    if (results.length < 5) {
-        const items = await searchApibay(movie.title);
-        for (const item of items) {
-            if (!seen.has(item.infoHash)) {
+    // Fallback if needed
+    if (results.length < 5 && movie.title) {
+        const moreItems = await searchApibay(movie.title);
+        for (const item of moreItems) {
+            if (item.infoHash && !seen.has(item.infoHash)) {
                 seen.add(item.infoHash);
                 results.push(item);
             }
@@ -324,24 +439,26 @@ async function searchTvTorrents(tv) {
     const s = String(tv.season).padStart(2, "0");
     const e = String(tv.episode).padStart(2, "0");
 
-    // 1. Standard pattern: Show S01E01
-    const q1 = `${tv.showName} S${s}E${e}`;
-    const items1 = await searchApibay(q1);
-    for (const item of items1) {
-        if (!seen.has(item.infoHash)) {
-            seen.add(item.infoHash);
-            results.push(item);
-        }
+    // Parallel multi-provider search: Torrentio + Apibay
+    const queries = [];
+
+    // 1. Torrentio (TorrentGalaxy, 1337x, RARBG, etc.)
+    if (tv.imdbId) {
+        queries.push(searchTorrentio("series", `${tv.imdbId}:${tv.season}:${tv.episode}`));
     }
 
-    // 2. Alternative pattern: Show Season 1 Episode 1
-    if (results.length < 3) {
-        const q2 = `${tv.showName} Season ${tv.season} Episode ${tv.episode}`;
-        const items2 = await searchApibay(q2);
-        for (const item of items2) {
-            if (!seen.has(item.infoHash)) {
-                seen.add(item.infoHash);
-                results.push(item);
+    // 2. Apibay (The Pirate Bay standard patterns)
+    queries.push(searchApibay(`${tv.showName} S${s}E${e}`));
+    queries.push(searchApibay(`${tv.showName} Season ${tv.season} Episode ${tv.episode}`));
+
+    const settled = await Promise.allSettled(queries);
+    for (const res of settled) {
+        if (res.status === "fulfilled" && Array.isArray(res.value)) {
+            for (const item of res.value) {
+                if (item.infoHash && !seen.has(item.infoHash)) {
+                    seen.add(item.infoHash);
+                    results.push(item);
+                }
             }
         }
     }
