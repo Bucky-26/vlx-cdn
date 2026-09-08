@@ -315,9 +315,21 @@ timeline.addEventListener("pointerleave", () => {
     }
 });
 
+let seekDebounceTimer = null;
+function debouncedSeek(targetTime) {
+    clearTimeout(seekDebounceTimer);
+    updateProgressUI(targetTime);
+    spinner.style.display = "flex";
+    spinnerText.innerText = `Fast-forwarding to ${formatTime(targetTime)}...`;
+
+    seekDebounceTimer = setTimeout(() => {
+        seekTo(targetTime);
+    }, 120);
+}
+
 function skip(seconds) {
     const current = getDisplayCurrentTime();
-    seekTo(current + seconds);
+    debouncedSeek(current + seconds);
     showToast(seconds > 0 ? `+${seconds}s` : `${seconds}s`);
 }
 

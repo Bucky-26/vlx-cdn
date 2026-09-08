@@ -134,16 +134,24 @@ router.post("/torrent", async (req, res) => {
             }
         }
 
-        // Probe duration with unified promise, give it up to 1200ms to resolve synchronously
-        try {
-            const dur = await Promise.race([
-                probeTorrentDuration(torrentData),
-                new Promise((r) => setTimeout(() => r(0), 1200))
-            ]);
-            if (dur > 0) {
-                torrentData.duration = dur;
+        // Immediately select the video file and rush its starting pieces
+        if (file) {
+            file.select(1);
+            if (torrent.critical && file._startPiece !== undefined) {
+                const rushEnd = Math.min(file._endPiece || torrent.pieces.length - 1, file._startPiece + 8);
+                torrent.critical(file._startPiece, rushEnd);
             }
-        } catch (e) {}
+        }
+
+        // Probe duration asynchronously in the background so stream responds in 0ms without delay
+        probeTorrentDuration(torrentData)
+            .then((dur) => {
+                if (dur > 0) {
+                    torrentData.duration = dur;
+                    console.log(`Discovered duration for ${file.name}: ${formatTime(dur)}`);
+                }
+            })
+            .catch(() => {});
 
         console.log("Selected video:", file.name);
 

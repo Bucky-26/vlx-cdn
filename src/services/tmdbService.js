@@ -22,9 +22,29 @@ async function tmdbFetch(endpoint) {
     return response.json();
 }
 
+const tmdbCache = new Map();
+
+function getCached(key) {
+    const item = tmdbCache.get(key);
+    if (!item) return null;
+    if (Date.now() > item.expiresAt) {
+        tmdbCache.delete(key);
+        return null;
+    }
+    return item.data;
+}
+
+function setCached(key, data, ttlMs = 1800000) {
+    tmdbCache.set(key, { data, expiresAt: Date.now() + ttlMs });
+}
+
 async function getMovieInfo(tmdbId) {
+    const cacheKey = `movie_${tmdbId}`;
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+
     const data = await tmdbFetch(`/movie/${tmdbId}`);
-    return {
+    const result = {
         id: data.id,
         mediaType: "movie",
         title: data.title,
@@ -40,15 +60,22 @@ async function getMovieInfo(tmdbId) {
         poster: data.poster_path ? `${TMDB_IMG_BASE}/w500${data.poster_path}` : null,
         backdrop: data.backdrop_path ? `${TMDB_IMG_BASE}/original${data.backdrop_path}` : null
     };
+
+    setCached(cacheKey, result);
+    return result;
 }
 
 async function getTvEpisodeInfo(tmdbId, season, episode) {
+    const cacheKey = `tv_${tmdbId}_${season}_${episode}`;
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+
     const [tvData, epData] = await Promise.all([
         tmdbFetch(`/tv/${tmdbId}`),
         tmdbFetch(`/tv/${tmdbId}/season/${season}/episode/${episode}`)
     ]);
 
-    return {
+    const result = {
         id: tvData.id,
         mediaType: "tv",
         showName: tvData.name,
@@ -68,6 +95,9 @@ async function getTvEpisodeInfo(tmdbId, season, episode) {
         poster: tvData.poster_path ? `${TMDB_IMG_BASE}/w500${tvData.poster_path}` : null,
         backdrop: tvData.backdrop_path ? `${TMDB_IMG_BASE}/original${tvData.backdrop_path}` : null
     };
+
+    setCached(cacheKey, result);
+    return result;
 }
 
 async function searchApibay(query) {
@@ -248,6 +278,10 @@ function getTop3ServersByPeers(results) {
 }
 
 async function searchMovieTorrents(movie) {
+    const cacheKey = `search_movie_${movie.id || movie.title}`;
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+
     const seen = new Set();
     const results = [];
 
@@ -274,10 +308,16 @@ async function searchMovieTorrents(movie) {
         }
     }
 
-    return getTop3ServersByPeers(results);
+    const top3 = getTop3ServersByPeers(results);
+    setCached(cacheKey, top3, 900000); // 15 min cache
+    return top3;
 }
 
 async function searchTvTorrents(tv) {
+    const cacheKey = `search_tv_${tv.id}_${tv.season}_${tv.episode}`;
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+
     const seen = new Set();
     const results = [];
 
@@ -306,7 +346,9 @@ async function searchTvTorrents(tv) {
         }
     }
 
-    return getTop3ServersByPeers(results);
+    const top3 = getTop3ServersByPeers(results);
+    setCached(cacheKey, top3, 900000); // 15 min cache
+    return top3;
 }
 
 module.exports = {

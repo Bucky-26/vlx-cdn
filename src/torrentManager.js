@@ -6,7 +6,9 @@ async function initClient() {
     if (!client) {
         const { default: WebTorrent } = await import("webtorrent");
         client = new WebTorrent({
-            maxConns: 120
+            maxConns: 200,
+            dht: true,
+            webSeeds: true
         });
 
         client.on("error", (error) => {
