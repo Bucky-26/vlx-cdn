@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Torrent Video Player</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <div class="container" id="appContainer">
+        <header class="main-header">
+            <div class="header-branding">
+                <a href="/" class="header-logo">🎬 Torrent Video Player</a>
+            </div>
+            <div id="playerModeNav" style="display: none;">
+                <a href="/" class="back-home-btn">🔍 Search / Magnet</a>
+            </div>
+            <p class="subtitle" id="mainSubtitle">Stream torrents with browser AAC audio transcoding and full seeking controls</p>
+        </header>
+
+        <!-- Player Section -->
+        <div class="player-section" id="playerSection">
+            <div class="video-container" id="videoContainer">
+                <div class="toast" id="toastMsg"></div>
+                <video id="player" playsinline preload="auto"></video>
+
+                <div class="spinner-overlay" id="spinner">
+                    <div class="spinner"></div>
+                </div>
+
+                <!-- Custom Controls -->
+                <div class="controls-overlay" id="controlsOverlay">
+                    <div class="timeline-box" id="timeline">
+                        <div class="buffered-bar" id="bufferedBar"></div>
+                        <div class="played-bar" id="playedBar"></div>
+                        <div class="scrubber-thumb" id="scrubberThumb"></div>
+                        <div class="time-tooltip" id="timeTooltip">00:00</div>
+                    </div>
+
+                    <div class="buttons-row">
+                        <div class="left-controls">
+                            <button class="ctrl-btn" id="playPauseBtn" onclick="togglePlayPause()" title="Play/Pause (Space)">▶</button>
+                            <button class="ctrl-btn" onclick="skip(-10)" title="Skip back 10s">↺ 10</button>
+                            <button class="ctrl-btn" onclick="skip(10)" title="Skip forward 10s">10 ↻</button>
+
+                            <div class="volume-wrap">
+                                <button class="ctrl-btn" id="volBtn" onclick="toggleMute()" title="Mute (M)">🔊</button>
+                                <input type="range" class="volume-slider" id="volSlider" min="0" max="1" step="0.05" value="1" oninput="changeVolume(this.value)">
+                            </div>
+
+                            <div class="time-display">
+                                <span id="currentTimeLabel">00:00</span> / <span id="totalTimeLabel">--:--</span>
+                            </div>
+                        </div>
+
+                        <div class="right-controls">
+                            <button class="btn-secondary" id="toggleAudioBtn" onclick="toggleAudioMode()" style="padding: 4px 10px; font-size: 0.78rem;">Direct Stream</button>
+                            <button class="ctrl-btn" onclick="toggleFullscreen()" title="Fullscreen (F)">⛶</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="stream-info">
+                <div>
+                    <div class="title" id="fileTitle"></div>
+                    <div class="audio-badge" id="audioModeLabel">🔊 Audio: AAC Stereo (Browser Compatible)</div>
+                </div>
+
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn-secondary" id="copyVlcBtn" onclick="copyVlcUrl()">📋 Copy VLC Link</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- TMDB Media Banner (Title, Details, and Stream Source Selector) -->
+        <div id="mediaBanner" class="media-card" style="display: none;"></div>
+
+        <!-- Search / Magnet Card (Default tool on homepage) -->
+        <div class="card" id="searchCard">
+            <div class="tabs-nav">
+                <button class="tab-btn active" id="tabSearchBtn" onclick="switchTab('search')">🔍 Search Torrents</button>
+                <button class="tab-btn" id="tabMagnetBtn" onclick="switchTab('magnet')">🧲 Direct Magnet / Hash</button>
+            </div>
+
+            <!-- Search View -->
+            <div id="searchView" class="tab-content active">
+                <form class="search-form" onsubmit="performSearch(event)">
+                    <div class="search-input-wrap">
+                        <input
+                            type="text"
+                            id="searchQuery"
+                            placeholder="Search movies, TV shows, anime (e.g. Reacher, Dune, Interstellar)..."
+                            autocomplete="off"
+                        >
+                        <button type="submit" class="btn-primary" id="searchSubmitBtn">🔍 Search</button>
+                    </div>
+                </form>
+
+                <div class="quick-tags">
+                    <span class="tag-label">Trending:</span>
+                    <button class="tag-chip" onclick="quickSearch('Reacher S04')">Reacher S04</button>
+                    <button class="tag-chip" onclick="quickSearch('Dune 2')">Dune 2</button>
+                    <button class="tag-chip" onclick="quickSearch('Oppenheimer')">Oppenheimer</button>
+                    <button class="tag-chip" onclick="quickSearch('Breaking Bad')">Breaking Bad</button>
+                    <button class="tag-chip" onclick="quickSearch('Interstellar')">Interstellar</button>
+                </div>
+
+                <div id="searchLoading" class="search-loading" style="display: none;">
+                    <div class="mini-spinner"></div>
+                    <span>Searching torrent swarms...</span>
+                </div>
+
+                <div id="searchResults" class="search-results"></div>
+            </div>
+
+            <!-- Direct Magnet View -->
+            <div id="magnetView" class="tab-content" style="display: none;">
+                <div class="input-group">
+                    <input
+                        type="text"
+                        id="magnet"
+                        placeholder="Paste magnet link (magnet:?xt=urn:btih:...) or 40-char infoHash here"
+                    >
+                    <button class="btn-primary" id="playBtn" onclick="playTorrent()">▶ Play Video</button>
+                </div>
+            </div>
+
+            <!-- Audio Options & Status Row -->
+            <div class="options-row" style="margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border);">
+                <label class="checkbox-label" title="Converts Dolby Digital Plus (DDP/EAC3), AC3, DTS, and 5.1 surround audio to stereo AAC for browser playback">
+                    <input type="checkbox" id="fixAudio" checked>
+                    <span>Fix Audio for Browser</span>
+                    <span class="badge">AAC Transcode</span>
+                </label>
+                <div id="status"></div>
+            </div>
+        </div>
+    </div>
+    <script src="/js/app.js"></script>
+</body>
+</html>
