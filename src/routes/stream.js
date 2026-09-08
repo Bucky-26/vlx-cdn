@@ -1,6 +1,6 @@
 const express = require("express");
 const cp = require("child_process");
-const ffmpegPath = require("ffmpeg-static");
+const { getFfmpegPath } = require("../ffmpegHelper");
 const { getMimeType } = require("../utils");
 const { getTorrentData, prioritizeTorrentWindow } = require("../torrentManager");
 
@@ -103,7 +103,8 @@ router.get("/:infoHash", (req, res) => {
             ];
         }
 
-        const proc = cp.spawn(ffmpegPath, ffmpegArgs);
+        const ffmpegBin = getFfmpegPath();
+        const proc = cp.spawn(ffmpegBin, ffmpegArgs);
         if (fileStream) {
             fileStream.pipe(proc.stdin);
         }
@@ -127,6 +128,16 @@ router.get("/:infoHash", (req, res) => {
                 cleanup();
             });
         }
+
+        proc.on("error", (err) => {
+            console.error("FFmpeg spawn error:", err.message);
+            cleanup();
+            if (!res.headersSent) {
+                res.status(500).send("Transcoding error: " + err.message);
+            } else {
+                try { res.end(); } catch (e) {}
+            }
+        });
 
         proc.stdin && proc.stdin.on("error", () => {});
         proc.stdout && proc.stdout.on("error", () => {});

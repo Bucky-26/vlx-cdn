@@ -4,6 +4,7 @@ const apiRoutes = require("./src/routes/api");
 const streamRoutes = require("./src/routes/stream");
 const { mediaRouter } = require("./src/routes/media");
 const { initClient, destroyClient } = require("./src/torrentManager");
+const { getFfmpegPath } = require("./src/ffmpegHelper");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,6 +20,9 @@ app.use("/api", apiRoutes);
 app.use("/stream", streamRoutes);
 
 async function start() {
+    const ffmpegBin = getFfmpegPath();
+    console.log(`FFmpeg binary configured: ${ffmpegBin}`);
+
     await initClient();
 
     app.listen(PORT, () => {

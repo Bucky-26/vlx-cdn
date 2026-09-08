@@ -1,5 +1,5 @@
 const cp = require("child_process");
-const ffmpegPath = require("ffmpeg-static");
+const { getFfmpegPath } = require("./ffmpegHelper");
 const { formatTime } = require("./utils");
 
 function probeTorrentDuration(torrentData) {
@@ -28,7 +28,14 @@ function probeTorrentDuration(torrentData) {
         try {
             // Read first 3MB directly from WebTorrent stream to capture MKV/MP4 headers
             const stream = torrentData.file.createReadStream({ start: 0, end: 3000000 });
-            const proc = cp.spawn(ffmpegPath, ["-i", "pipe:0"]);
+            const proc = cp.spawn(getFfmpegPath(), ["-i", "pipe:0"]);
+
+            proc.on("error", (err) => {
+                console.warn("FFmpeg probe process error:", err.message);
+                clearTimeout(timer);
+                try { stream.destroy(); } catch (e) {}
+                done(0);
+            });
 
             proc.stderr.on("data", (d) => {
                 if (resolved) return;
