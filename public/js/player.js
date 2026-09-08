@@ -104,12 +104,50 @@ video.addEventListener("pause", () => {
 
 video.addEventListener("waiting", () => {
     spinner.style.display = "flex";
-    spinnerText.innerText = "Buffering stream...";
+    if (activeTorrent && activeTorrent.infoHash) {
+        fetchStatsOnce(activeTorrent.infoHash);
+    } else {
+        spinnerText.innerText = "Buffering stream...";
+    }
 });
 
 video.addEventListener("playing", () => {
     spinner.style.display = "none";
 });
+
+/* Swarm Stats Polling */
+let statsPollTimer = null;
+
+async function fetchStatsOnce(infoHash) {
+    if (!infoHash) return;
+    try {
+        const res = await fetch("/api/stats/" + infoHash);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (spinner.style.display !== "none") {
+            if (data.downloadSpeed > 0) {
+                spinnerText.innerText = `Buffering: ${data.downloadSpeedFormatted} (${data.numPeers} peers)...`;
+            } else if (data.numPeers > 0) {
+                spinnerText.innerText = `Connected to ${data.numPeers} peers, requesting pieces...`;
+            } else {
+                spinnerText.innerText = "Connecting to swarm & searching peers...";
+            }
+        }
+    } catch (e) {}
+}
+
+function startStatsPolling(infoHash) {
+    clearInterval(statsPollTimer);
+    if (!infoHash) return;
+    fetchStatsOnce(infoHash);
+    statsPollTimer = setInterval(() => {
+        fetchStatsOnce(infoHash);
+    }, 1500);
+}
+
+function stopStatsPolling() {
+    clearInterval(statsPollTimer);
+}
 
 /* Duration & Progress Calculations */
 function pollDuration(infoHash) {
@@ -486,6 +524,9 @@ async function startStreamForTorrent(torrent) {
         } else {
             pollDuration(data.infoHash);
         }
+
+        // Start live swarm statistics polling
+        startStatsPolling(data.infoHash);
 
         // Set AAC transcode according to audio compatibility
         if (data.needsTranscode) {

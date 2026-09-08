@@ -1,8 +1,8 @@
 const express = require("express");
 const path = require("path");
-const { formatTime, formatBytes, buildMagnet, isAudioIncompatible, VIDEO_EXTENSIONS } = require("../utils");
+const { formatTime, formatBytes, buildMagnet, isAudioIncompatible, VIDEO_EXTENSIONS, TRACKERS } = require("../utils");
 const { probeTorrentDuration } = require("../probe");
-const { getClient, getTorrentData, setTorrentData, hasTorrent } = require("../torrentManager");
+const { getClient, getTorrentData, setTorrentData, hasTorrent, prioritizeTorrentWindow, cleanStaleTorrents } = require("../torrentManager");
 
 const router = express.Router();
 
@@ -118,30 +118,14 @@ router.post("/torrent", async (req, res) => {
         const torrentData = {
             torrent,
             file,
-            duration: 0
+            duration: 0,
+            currentPiece: file._startPiece || 0,
+            lastBufferedPiece: file._startPiece || 0
         };
         setTorrentData(infoHash, torrentData);
 
-        // Head and tail piece prioritization for instant seeking:
-        // Pre-fetch container headers at start (pieces 0-3) and index/cues at end of torrent
-        if (torrent.pieces && torrent.pieces.length > 0) {
-            const totalPieces = torrent.pieces.length;
-            if (torrent.critical) {
-                torrent.critical(0, Math.min(totalPieces - 1, 3));
-                if (totalPieces > 8) {
-                    torrent.critical(totalPieces - 4, totalPieces - 1);
-                }
-            }
-        }
-
-        // Immediately select the video file and rush its starting pieces
-        if (file) {
-            file.select(1);
-            if (torrent.critical && file._startPiece !== undefined) {
-                const rushEnd = Math.min(file._endPiece || torrent.pieces.length - 1, file._startPiece + 8);
-                torrent.critical(file._startPiece, rushEnd);
-            }
-        }
+        // Immediately prioritize container headers and rush the first 15 pieces of the video
+        prioritizeTorrentWindow(torrentData, file._startPiece || 0, 15, 80);
 
         // Probe duration asynchronously in the background so stream responds in 0ms without delay
         probeTorrentDuration(torrentData)
@@ -166,6 +150,9 @@ router.post("/torrent", async (req, res) => {
         });
     }
 
+    // Stop background torrents to ensure 100% bandwidth for the active video
+    cleanStaleTorrents(infoHash);
+
     // Check if torrent already exists in client
     try {
         const existing = await client.get(infoHash);
@@ -184,7 +171,7 @@ router.post("/torrent", async (req, res) => {
         console.log("client.get notice:", e.message);
     }
 
-    console.log("Adding torrent:", infoHash);
+    console.log("Adding torrent with accelerated streaming options:", infoHash);
 
     // Timeout after 30 seconds if peers do not send metadata
     const timeoutTimer = setTimeout(() => {
@@ -196,12 +183,22 @@ router.post("/torrent", async (req, res) => {
         }
     }, 30000);
 
+    const torrentOpts = {
+        deselect: true, // Prevents downloading arbitrary pieces from the entire file
+        strategy: "sequential", // Request blocks sequentially
+        maxConns: 150, // Dedicated peer connection pool
+        storeCacheSlots: 120, // 120 pieces in RAM chunk store
+        announce: TRACKERS
+    };
+
     try {
-        const torrent = client.add(magnet, (t) => {
+        const torrent = client.add(magnet, torrentOpts, (t) => {
             clearTimeout(timeoutTimer);
+            try { t.setMaxListeners(0); } catch (e) {}
             console.log("Torrent metadata received:", t.name);
             setupTorrent(t);
         });
+        try { torrent.setMaxListeners(0); } catch (e) {}
 
         torrent.on("error", (err) => {
             clearTimeout(timeoutTimer);
@@ -237,6 +234,20 @@ router.get("/duration/:infoHash", async (req, res) => {
 
     const dur = await probeTorrentDuration(data);
     res.json({ duration: dur || 0, durationFormatted: formatTime(dur || 0) });
+});
+
+router.get("/stats/:infoHash", (req, res) => {
+    const infoHash = (req.params.infoHash || "").toLowerCase();
+    const data = getTorrentData(infoHash);
+    if (!data || !data.torrent) return res.status(404).json({ error: "Torrent not found" });
+
+    const t = data.torrent;
+    res.json({
+        numPeers: t.numPeers || 0,
+        downloadSpeed: t.downloadSpeed || 0,
+        downloadSpeedFormatted: formatBytes(t.downloadSpeed || 0) + "/s",
+        progress: Math.round((t.progress || 0) * 100)
+    });
 });
 
 // TMDB Media endpoints under /api

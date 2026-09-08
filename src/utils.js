@@ -14,8 +14,13 @@ const TRACKERS = [
     "udp://explodie.org:6969/announce",
     "udp://bt.cl.sgjp.net:6969/announce",
     "udp://tracker.zerobytes.to:1337/announce",
+    "udp://tracker.tiny-vps.com:6969/announce",
+    "udp://tracker.theoks.net:6969/announce",
+    "udp://p4p.arenabg.com:1337/announce",
+    "udp://movies.zsw.ca:6969/announce",
     "wss://tracker.openwebtorrent.com",
-    "wss://tracker.btorrent.xyz"
+    "wss://tracker.btorrent.xyz",
+    "wss://tracker.fastcast.nz"
 ];
 
 const VIDEO_EXTENSIONS = [".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v"];

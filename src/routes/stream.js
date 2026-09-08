@@ -2,7 +2,7 @@ const express = require("express");
 const cp = require("child_process");
 const ffmpegPath = require("ffmpeg-static");
 const { getMimeType } = require("../utils");
-const { getTorrentData } = require("../torrentManager");
+const { getTorrentData, prioritizeTorrentWindow } = require("../torrentManager");
 
 const router = express.Router();
 
@@ -14,9 +14,11 @@ router.get("/:infoHash", (req, res) => {
         return res.status(404).send("Torrent not found");
     }
 
-    const { file } = torrentData;
+    const { file, torrent } = torrentData;
+    const fileOffset = file.offset || 0;
+    const pieceLength = torrent && torrent.pieceLength ? torrent.pieceLength : 1048576;
+    const totalPieces = torrent && torrent.pieces ? torrent.pieces.length : 1;
 
-    // Transcode audio to stereo AAC with seeking support
     // Transcode audio to stereo AAC with seeking support
     if (req.query.transcode === "audio" || req.query.transcode === "true" || req.query.transcode === "1") {
         const startTime = Math.max(0, parseFloat(req.query.t || req.query.start || req.query.ss || "0"));
@@ -33,27 +35,24 @@ router.get("/:infoHash", (req, res) => {
         let ffmpegArgs = [];
 
         if (startTime > 0) {
-            // Pre-prioritize pieces at target seek position before spawning FFmpeg
-            try {
-                if (torrentData.duration > 0 && torrentData.torrent && torrentData.torrent.pieceLength && torrentData.torrent.pieces) {
-                    const approxByte = Math.floor((startTime / torrentData.duration) * file.length);
-                    const targetPiece = Math.max(0, Math.min(
-                        torrentData.torrent.pieces.length - 1,
-                        Math.floor(((file.offset || 0) + approxByte) / torrentData.torrent.pieceLength)
-                    ));
-                    const rushEnd = Math.min(torrentData.torrent.pieces.length - 1, targetPiece + 8);
-                    if (torrentData.torrent.critical && targetPiece <= rushEnd) {
-                        torrentData.torrent.critical(targetPiece, rushEnd);
-                    }
-                }
-            } catch (err) {}
+            // Prioritize swarm pieces at target seek position before spawning FFmpeg
+            if (torrentData.duration > 0) {
+                const approxByte = Math.floor((startTime / torrentData.duration) * file.length);
+                const targetPiece = Math.max(0, Math.min(
+                    totalPieces - 1,
+                    Math.floor((fileOffset + approxByte) / pieceLength)
+                ));
+                prioritizeTorrentWindow(torrentData, targetPiece, 15, 80);
+            }
 
             // Seek directly to keyframe via internal HTTP range stream with fastseek options
             ffmpegArgs = [
                 "-loglevel", "warning",
-                "-analyzeduration", "1500000",
-                "-probesize", "1500000",
+                "-threads", "0",
+                "-analyzeduration", "1000000",
+                "-probesize", "1000000",
                 "-fflags", "+fastseek+nobuffer",
+                "-flags", "+low_delay",
                 "-noaccurate_seek",
                 "-ss", String(startTime),
                 "-i", `http://127.0.0.1:${port}/stream/${infoHash}`,
@@ -64,17 +63,24 @@ router.get("/:infoHash", (req, res) => {
                 "-c:a", "aac",
                 "-ac", "2",
                 "-b:a", "192k",
+                "-tune", "zerolatency",
                 "-flush_packets", "1",
-                "-frag_duration", "400000",
+                "-frag_duration", "300000",
                 "-max_muxing_queue_size", "4096",
                 "-f", "mp4",
                 "-movflags", "frag_keyframe+empty_moov+default_base_moof",
                 "pipe:1"
             ];
         } else {
-            fileStream = file.createReadStream();
+            prioritizeTorrentWindow(torrentData, file._startPiece || 0, 15, 80);
+            fileStream = file.createReadStream({ highWaterMark: 4 * 1024 * 1024 });
             ffmpegArgs = [
                 "-loglevel", "warning",
+                "-threads", "0",
+                "-analyzeduration", "1000000",
+                "-probesize", "1000000",
+                "-fflags", "+fastseek+nobuffer",
+                "-flags", "+low_delay",
                 "-i", "pipe:0",
                 "-map", "0:v:0",
                 "-map", "0:a:0?",
@@ -83,8 +89,9 @@ router.get("/:infoHash", (req, res) => {
                 "-c:a", "aac",
                 "-ac", "2",
                 "-b:a", "192k",
+                "-tune", "zerolatency",
                 "-flush_packets", "1",
-                "-frag_duration", "400000",
+                "-frag_duration", "300000",
                 "-max_muxing_queue_size", "4096",
                 "-f", "mp4",
                 "-movflags", "frag_keyframe+empty_moov+default_base_moof",
@@ -140,7 +147,8 @@ router.get("/:infoHash", (req, res) => {
             "Accept-Ranges": "bytes"
         });
 
-        const stream = file.createReadStream();
+        prioritizeTorrentWindow(torrentData, file._startPiece || 0, 15, 80);
+        const stream = file.createReadStream({ highWaterMark: 4 * 1024 * 1024 });
 
         stream.on("error", (err) => {
             if (err.code !== "PREMATURE_CLOSE" && err.code !== "ERR_STREAM_PREMATURE_CLOSE") {
@@ -175,21 +183,12 @@ router.get("/:infoHash", (req, res) => {
         end = file.length - 1;
     }
 
-    // Safely prioritize swarm pieces for this seek position
-    try {
-        if (torrentData.torrent && torrentData.torrent.pieceLength && torrentData.torrent.pieces) {
-            const fileOffset = file.offset || 0;
-            const targetPiece = Math.max(0, Math.min(
-                torrentData.torrent.pieces.length - 1,
-                Math.floor((fileOffset + start) / torrentData.torrent.pieceLength)
-            ));
-            const rushEnd = Math.min(torrentData.torrent.pieces.length - 1, targetPiece + 8);
-
-            if (torrentData.torrent.critical && targetPiece <= rushEnd) {
-                torrentData.torrent.critical(targetPiece, rushEnd);
-            }
-        }
-    } catch (err) {}
+    // Determine target piece and immediately prioritize rush + forward window
+    const targetPiece = Math.max(0, Math.min(
+        totalPieces - 1,
+        Math.floor((fileOffset + start) / pieceLength)
+    ));
+    prioritizeTorrentWindow(torrentData, targetPiece, 15, 80);
 
     const chunkSize = end - start + 1;
 
@@ -200,7 +199,19 @@ router.get("/:infoHash", (req, res) => {
         "Content-Type": getMimeType(file.name)
     });
 
-    const stream = file.createReadStream({ start, end });
+    const stream = file.createReadStream({ start, end, highWaterMark: 4 * 1024 * 1024 });
+    let currentByteOffset = start;
+    let lastPushedPiece = targetPiece;
+
+    // Dynamically advance forward buffer window as stream data flows
+    stream.on("data", (chunk) => {
+        currentByteOffset += chunk.length;
+        const currentPiece = Math.floor((fileOffset + currentByteOffset) / pieceLength);
+        if (currentPiece - lastPushedPiece >= 4) {
+            lastPushedPiece = currentPiece;
+            prioritizeTorrentWindow(torrentData, currentPiece, 12, 80);
+        }
+    });
 
     stream.on("error", (err) => {
         if (err.code !== "PREMATURE_CLOSE" && err.code !== "ERR_STREAM_PREMATURE_CLOSE") {
