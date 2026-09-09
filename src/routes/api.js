@@ -3,6 +3,7 @@ const { formatTime, formatBytes } = require("../utils");
 const { probeTorrentDuration } = require("../probe");
 const { getTorrentData, prepareTorrentOnServer, getSource, cleanStaleTorrents } = require("../torrentManager");
 const { handleMovie, handleTv } = require("./media");
+const { getTvSeasonEpisodes } = require("../services/tmdbService");
 
 const router = express.Router();
 
@@ -17,6 +18,17 @@ router.get("/tv/:tmdbid/:season/epesode", (req, res) => {
 router.get("/tv/:tmdbid/:season", (req, res) => {
     req.params.episode = "1";
     return handleTv(req, res);
+});
+
+// TV Season Episodes endpoint (for Netflix / HBO episode selection drawer)
+router.get("/tv/:tmdbid/season/:season/episodes", async (req, res) => {
+    try {
+        const { tmdbid, season } = req.params;
+        const data = await getTvSeasonEpisodes(tmdbid, season);
+        return res.json(data);
+    } catch (err) {
+        return res.status(500).json({ error: err.message || "Failed to fetch season episodes" });
+    }
 });
 
 // Server-side source selection & activation (when user switches quality or server)

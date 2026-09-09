@@ -2,46 +2,114 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Viewlix Player</title>
-    <link rel="stylesheet" href="/css/player.css">
+    
+    <!-- Google Fonts: Outfit -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <!-- Plyr.io CSS -->
+    <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css">
+
+    <!-- Custom Netflix/HBO Theme & Episode Drawer Styles -->
+    <link rel="stylesheet" href="/css/player.css?v=2.0.6">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🍿</text></svg>">
 </head>
 <body>
-    <div id="playerRoot">
-        <!-- Main Video Element -->
-        <video id="player" playsinline preload="auto" onclick="togglePlay()"></video>
+    <div id="playerRoot" class="player-root">
 
-        <!-- Center Pulse Indicator -->
-        <div class="center-action" id="centerAction">▶</div>
+        <!-- Video Player Element (Plyr wraps this) -->
+        <div class="video-container" id="videoContainer">
+            <video id="player" playsinline webkit-playsinline x5-playsinline preload="metadata" crossorigin="anonymous"></video>
+            
+            <!-- Netflix-Style Central Buffering Spinner -->
+            <div class="buffering-spinner" id="bufferingSpinner" style="display: none;">
+                <div class="netflix-buffering-ring"></div>
+            </div>
+
+            <!-- Mobile Double Tap Seek Ripples -->
+            <div class="seek-ripple seek-ripple-left" id="rippleLeft">
+                <div class="ripple-circle">
+                    <svg viewBox="0 0 24 24"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z"/></svg>
+                    <span>10s</span>
+                </div>
+            </div>
+            <div class="seek-ripple seek-ripple-right" id="rippleRight">
+                <div class="ripple-circle">
+                    <svg viewBox="0 0 24 24"><path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/></svg>
+                    <span>10s</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Top Floating Navigation & Info Bar -->
+        <div class="top-bar" id="topBar">
+            <div class="top-bar-left">
+                <a href="/" class="brand-logo" onclick="event.preventDefault()">
+                    <span class="brand-v">V</span>
+                    <span class="brand-text">VIEWLIX</span>
+                </a>
+                <div class="title-meta-group">
+                    <div class="title-row">
+                        <span class="media-title-text" id="mediaTitleText">Loading title...</span>
+                        <span class="media-type-badge" id="mediaBadge">MEDIA</span>
+                        <span class="quality-badge" id="topQualityBadge">1080p</span>
+                    </div>
+                    <div class="episode-subtitle" id="mediaSubtitleText" style="display: none;">
+                        <!-- S1:E1 • Welcome to Margrave -->
+                    </div>
+                </div>
+            </div>
+
+            <div class="top-bar-right">
+                <!-- TV Episodes Drawer Button (Netflix/HBO style) -->
+                <button class="top-action-btn tv-episodes-btn" id="btnEpisodesToggle" onclick="toggleEpisodesDrawer()" style="display: none;" title="Seasons & Episodes">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/>
+                    </svg>
+                    <span>Episodes</span>
+                </button>
+
+                <!-- Next Episode Button (TV only) -->
+                <button class="top-action-btn tv-next-btn" id="btnNextEp" onclick="playNextEpisode()" style="display: none;" title="Next Episode">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/>
+                    </svg>
+                    <span>Next Ep</span>
+                </button>
+
+                <!-- Server & Quality Dropdown Button -->
+                <button class="top-action-btn server-btn" id="btnServerToggle" onclick="toggleServerModal()" title="Streaming Servers">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+                    </svg>
+                    <span id="activeServerLabel">Server 1 (1080p)</span>
+                </button>
+            </div>
+        </div>
 
         <!-- Buffer Spinner Overlay -->
         <div class="spinner-overlay" id="spinner">
-            <div class="spinner"></div>
-            <div class="spinner-text" id="spinnerText">Loading media stream...</div>
+            <div class="spinner-ring"></div>
+            <div class="spinner-text" id="spinnerText">Connecting to high-speed stream...</div>
+            <div class="spinner-subtext" id="spinnerSubtext">Selecting best peer source</div>
         </div>
 
-        <!-- Top-Center Audio Muted Pill (Screenshot Match) -->
+        <!-- Top-Center Audio Muted Pill -->
         <div class="unmute-pill" id="unmutePill" style="display: none;" onclick="handleUnmuteClick()">
             <span class="unmute-icon">🔊</span>
             <span>Audio is muted — Click to unmute</span>
         </div>
 
-        <!-- Top-Left Branding & Media Info -->
-        <div class="top-bar" id="topBar">
-            <div class="brand-logo">
-                <svg viewBox="0 0 24 24">
-                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>
-                </svg>
-                VIEWLIX
-            </div>
-            <div class="media-heading">
-                <span class="media-title-text" id="mediaTitleText">Loading...</span>
-                <span class="media-type-badge" id="mediaBadge">MEDIA</span>
-                <span class="quality-badge" id="topQualityBadge">1080p</span>
-            </div>
-        </div>
-
-        <!-- Bottom-Left Resume Pill (Screenshot Match) -->
+        <!-- Bottom-Left Resume Pill -->
         <div class="resume-pill" id="resumePill" style="display: none;">
             <div class="resume-dot"></div>
             <span class="resume-text" id="resumeText">Resumed at 0:00</span>
@@ -49,131 +117,76 @@
             <button class="btn-close-resume" onclick="closeResumePill()">✕</button>
         </div>
 
-        <!-- Bottom Controls Overlay (Screenshot Match) -->
-        <div class="bottom-controls" id="bottomControls">
-            <!-- Red Progress Timeline -->
-            <div class="timeline-container" id="timeline">
-                <div class="timeline-bg">
-                    <div class="buffered-bar" id="bufferedBar"></div>
-                    <div class="played-bar" id="playedBar"></div>
-                    <div class="scrubber-thumb" id="scrubberThumb"></div>
+        <!-- Netflix / HBO Style Slide-Out Seasons & Episodes Drawer -->
+        <div class="episodes-drawer-backdrop" id="drawerBackdrop" onclick="closeEpisodesDrawer()"></div>
+        <aside class="episodes-drawer" id="episodesDrawer">
+            <div class="drawer-header">
+                <div class="drawer-header-info">
+                    <h2 class="drawer-show-title" id="drawerShowTitle">Episodes</h2>
+                    <div class="season-selector-wrapper">
+                        <select class="season-dropdown" id="seasonSelect" onchange="onSeasonChange(this.value)">
+                            <!-- Populated dynamically -->
+                        </select>
+                    </div>
                 </div>
-                <div class="time-tooltip" id="timeTooltip">00:00</div>
+                <button class="drawer-close-btn" onclick="closeEpisodesDrawer()" title="Close Drawer (Esc)">✕</button>
             </div>
 
-            <!-- Controls Row -->
-            <div class="controls-row">
-                <div class="left-ctrls">
-                    <!-- Play / Pause -->
-                    <button class="icon-btn" id="playPauseBtn" onclick="togglePlay()" title="Play/Pause (Space)">
-                        <svg viewBox="0 0 24 24" id="playIcon">
-                            <path d="M8 5v14l11-7z"/>
-                        </svg>
-                        <svg viewBox="0 0 24 24" id="pauseIcon" style="display: none;">
-                            <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
-                        </svg>
-                    </button>
+            <!-- Scrollable Episode Cards Grid -->
+            <div class="episodes-cards-container" id="episodesCardsList">
+                <!-- Episode cards injected dynamically -->
+            </div>
+        </aside>
 
-                    <!-- Skip Back 10s -->
-                    <button class="icon-btn" onclick="skip(-10)" title="Rewind 10s (←)">
-                        <svg viewBox="0 0 24 24">
-                            <path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.2 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/>
-                        </svg>
-                    </button>
-
-                    <!-- Skip Forward 10s -->
-                    <button class="icon-btn" onclick="skip(10)" title="Forward 10s (→)">
-                        <svg viewBox="0 0 24 24">
-                            <path d="M11.5 8c2.65 0 5.05.99 6.9 2.6L22 7v9h-9l3.62-3.62c-1.39-1.2-3.16-1.88-5.12-1.88-3.54 0-6.55 2.31-7.6 5.5l-2.37-.78C2.92 11.03 6.85 8 11.5 8z"/>
-                        </svg>
-                    </button>
-
-                    <!-- Volume -->
-                    <div class="volume-group">
-                        <button class="icon-btn" id="volBtn" onclick="toggleMute()" title="Mute (M)">
-                            <svg viewBox="0 0 24 24" id="volHighIcon">
-                                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
-                            </svg>
-                            <svg viewBox="0 0 24 24" id="volMuteIcon" style="display: none;">
-                                <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
-                            </svg>
-                        </button>
-                        <input type="range" class="volume-slider" id="volSlider" min="0" max="1" step="0.05" value="1" oninput="updateVolume(this.value)">
-                    </div>
-
-                    <!-- Time Display -->
-                    <span class="time-stamp" id="timeStamp">00:00 / 00:00</span>
-                </div>
-
-                <div class="right-ctrls">
-                    <!-- Stream Quality Selector Button -->
-                    <div class="quality-wrapper">
-                        <button class="quality-btn" id="qualityBtn" onclick="toggleQualityMenu()" title="Stream Quality">
-                            <span id="currentQualityLabel">1080p</span>
-                        </button>
-                        <!-- Quality Dropdown Menu -->
-                        <div class="quality-menu" id="qualityMenu">
-                            <div class="quality-menu-header">QUALITY</div>
-                            <div id="qualityOptionsList">
-                                <!-- Populated dynamically -->
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Settings Gear -->
-                    <button class="icon-btn" id="settingsBtn" onclick="toggleSettings()" title="Settings">
-                        <svg viewBox="0 0 24 24">
-                            <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
-                        </svg>
-                    </button>
-
-                    <!-- Picture-in-Picture -->
-                    <button class="icon-btn" onclick="togglePip()" title="Picture in Picture (P)">
-                        <svg viewBox="0 0 24 24">
-                            <path d="M19 7h-8v6h8V7zm2-4H3c-1.1 0-2 .9-2 2v14c0 1.1.9 1.98 2 1.98h18c1.1 0 2-.88 2-1.98V5c0-1.1-.9-2-2-2zm0 16.01H3V4.98h18v14.03z"/>
-                        </svg>
-                    </button>
-
-                    <!-- Fullscreen -->
-                    <button class="icon-btn" onclick="toggleFullscreen()" title="Fullscreen (F)">
-                        <svg viewBox="0 0 24 24">
-                            <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
-                        </svg>
-                    </button>
-
-                    <!-- Small Brand Watermark -->
-                    <span class="brand-watermark">VIEWLIX</span>
+        <!-- Netflix-Style Next Episode Auto-Prompt Card -->
+        <div class="next-episode-prompt" id="nextEpPrompt" style="display: none;">
+            <div class="next-prompt-thumb-wrap">
+                <img id="nextPromptThumb" src="" alt="Next Episode">
+                <div class="next-prompt-countdown" id="nextPromptCountdown">10</div>
+            </div>
+            <div class="next-prompt-info">
+                <div class="next-prompt-label">UP NEXT</div>
+                <div class="next-prompt-title" id="nextPromptTitle">Episode Title</div>
+                <div class="next-prompt-actions">
+                    <button class="btn-prompt-play" onclick="playNextEpisode()">Play Now</button>
+                    <button class="btn-prompt-dismiss" onclick="dismissNextPrompt()">Dismiss</button>
                 </div>
             </div>
         </div>
 
-        <!-- Floating Settings Menu -->
-        <div class="settings-menu" id="settingsMenu">
-            <div class="settings-header">
-                <span>Player Settings</span>
-                <span style="font-size: 0.75rem; color: #ef4444; font-weight: 700;" id="settingsQualityBadge">1080p HD</span>
+        <!-- Floating Server & Quality Settings Modal -->
+        <div class="server-modal-backdrop" id="serverModalBackdrop" onclick="closeServerModal()"></div>
+        <div class="server-modal" id="serverModal">
+            <div class="modal-header">
+                <h3>Streaming Quality & Servers</h3>
+                <button class="modal-close-btn" onclick="closeServerModal()">✕</button>
             </div>
 
-            <div>
-                <div class="settings-section-title">Video Quality</div>
-                <select class="server-select" id="qualitySelect" onchange="handleQualitySelect(this.value)">
-                    <!-- Populated dynamically -->
-                </select>
-            </div>
+            <div class="modal-body">
+                <div class="modal-section">
+                    <label class="modal-label">Video Quality</label>
+                    <div class="quality-pills" id="qualityPills">
+                        <!-- Populated dynamically -->
+                    </div>
+                </div>
 
-            <div>
-                <div class="settings-section-title">Streaming Server</div>
-                <select class="server-select" id="serverSelect" onchange="handleServerChange(this.value)">
-                    <!-- Populated dynamically -->
-                </select>
-            </div>
+                <div class="modal-section">
+                    <label class="modal-label">Streaming Server</label>
+                    <div class="server-list" id="serverList">
+                        <!-- Populated dynamically -->
+                    </div>
+                </div>
 
-            <div class="audio-toggle-row">
-                <span class="audio-toggle-label">Browser Audio Fix (AAC Transcode)</span>
-                <label class="switch">
-                    <input type="checkbox" id="audioFixSwitch" checked onchange="toggleAudioTranscode()">
-                    <span class="slider"></span>
-                </label>
+                <div class="modal-section toggle-row">
+                    <div class="toggle-info">
+                        <span class="toggle-title">Browser Audio Fix</span>
+                        <span class="toggle-desc">Transcode 5.1/DTS/AC3 audio for web compatibility</span>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="audioFixSwitch" checked onchange="toggleAudioTranscode()">
+                        <span class="slider"></span>
+                    </label>
+                </div>
             </div>
         </div>
 
@@ -181,6 +194,10 @@
         <div class="toast-notice" id="toastNotice"></div>
     </div>
 
-    <script src="/js/player.js"></script>
+    <!-- Plyr.io JS (Polyfilled for full browser compatibility) -->
+    <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
+
+    <!-- Player App Script -->
+    <script src="/js/player.js?v=2.0.5"></script>
 </body>
 </html>

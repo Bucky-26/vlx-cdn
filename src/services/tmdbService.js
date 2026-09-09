@@ -72,11 +72,33 @@ async function getTvEpisodeInfo(tmdbId, season, episode) {
     const cached = getCached(cacheKey);
     if (cached) return cached;
 
-    const [tvData, epData, extData] = await Promise.all([
+    const [tvData, seasonData, extData] = await Promise.all([
         tmdbFetch(`/tv/${tmdbId}`),
-        tmdbFetch(`/tv/${tmdbId}/season/${season}/episode/${episode}`),
+        tmdbFetch(`/tv/${tmdbId}/season/${season}`).catch(() => ({})),
         tmdbFetch(`/tv/${tmdbId}/external_ids`).catch(() => ({}))
     ]);
+
+    const episodesList = seasonData && Array.isArray(seasonData.episodes) ? seasonData.episodes : [];
+    const epNum = parseInt(episode, 10);
+    const epData = episodesList.find((e) => e.episode_number === epNum) || episodesList[0] || {};
+
+    const seasons = (tvData.seasons || [])
+        .filter((s) => s.season_number > 0)
+        .map((s) => ({
+            seasonNumber: s.season_number,
+            name: s.name || `Season ${s.season_number}`,
+            episodeCount: s.episode_count,
+            poster: s.poster_path ? `${TMDB_IMG_BASE}/w300${s.poster_path}` : null
+        }));
+
+    const episodes = episodesList.map((ep) => ({
+        episodeNumber: ep.episode_number,
+        name: ep.name || `Episode ${ep.episode_number}`,
+        overview: ep.overview || "",
+        runtime: ep.runtime || (tvData.episode_run_time && tvData.episode_run_time[0]) || 50,
+        still: ep.still_path ? `${TMDB_IMG_BASE}/w300${ep.still_path}` : null,
+        voteAverage: ep.vote_average ? parseFloat(ep.vote_average.toFixed(1)) : 0
+    }));
 
     const result = {
         id: tvData.id,
@@ -84,7 +106,7 @@ async function getTvEpisodeInfo(tmdbId, season, episode) {
         showName: tvData.name,
         originalLanguage: (tvData.original_language || "en").toLowerCase(),
         season: parseInt(season, 10),
-        episode: parseInt(episode, 10),
+        episode: epNum,
         episodeTitle: epData.name || `Episode ${episode}`,
         airDate: epData.air_date || null,
         imdbId: extData.imdb_id || null,
@@ -98,7 +120,34 @@ async function getTvEpisodeInfo(tmdbId, season, episode) {
         runtime: epData.runtime || (tvData.episode_run_time && tvData.episode_run_time[0]) || 50,
         still: epData.still_path ? `${TMDB_IMG_BASE}/original${epData.still_path}` : null,
         poster: tvData.poster_path ? `${TMDB_IMG_BASE}/w500${tvData.poster_path}` : null,
-        backdrop: tvData.backdrop_path ? `${TMDB_IMG_BASE}/original${tvData.backdrop_path}` : null
+        backdrop: tvData.backdrop_path ? `${TMDB_IMG_BASE}/original${tvData.backdrop_path}` : null,
+        seasons,
+        episodes
+    };
+
+    setCached(cacheKey, result);
+    return result;
+}
+
+async function getTvSeasonEpisodes(tmdbId, season) {
+    const cacheKey = `tv_season_${tmdbId}_${season}`;
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+
+    const data = await tmdbFetch(`/tv/${tmdbId}/season/${season}`);
+    const episodes = (data.episodes || []).map((ep) => ({
+        episodeNumber: ep.episode_number,
+        name: ep.name || `Episode ${ep.episode_number}`,
+        overview: ep.overview || "",
+        runtime: ep.runtime || 50,
+        still: ep.still_path ? `${TMDB_IMG_BASE}/w300${ep.still_path}` : null,
+        voteAverage: ep.vote_average ? parseFloat(ep.vote_average.toFixed(1)) : 0
+    }));
+
+    const result = {
+        season: parseInt(season, 10),
+        name: data.name || `Season ${season}`,
+        episodes
     };
 
     setCached(cacheKey, result);
@@ -584,6 +633,7 @@ module.exports = {
     getTop3ServersByPeers,
     getMovieInfo,
     getTvEpisodeInfo,
+    getTvSeasonEpisodes,
     searchMovieTorrents,
     searchTvTorrents
 };

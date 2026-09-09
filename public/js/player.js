@@ -1,3 +1,10 @@
+/**
+ * ============================================================================
+ * VIEWLIX STREAMING PLAYER — PLYR.IO & NETFLIX/HBO EPISODE SELECTION
+ * ============================================================================
+ */
+
+let plyrInstance = null;
 let currentMedia = null;
 let currentSources = [];
 let activeSource = null;
@@ -6,48 +13,58 @@ let isAudioTranscode = false;
 let streamTimeOffset = 0;
 let totalDuration = 0;
 let hasProbedDuration = false;
-let isDragging = false;
-let isSeeking = false;
 let durationPollTimer = null;
 let controlsTimeout = null;
 let resumeStorageKey = "";
 let currentQuality = "1080p";
 let availableQualities = [];
+let nextPromptDismissed = false;
+let nextCountdownTimer = null;
+const seasonEpisodesCache = new Map(); // seasonNumber -> episodes array
 
 // DOM Elements
-const video = document.getElementById("player");
+const videoEl = document.getElementById("player");
 const playerRoot = document.getElementById("playerRoot");
 const spinner = document.getElementById("spinner");
 const spinnerText = document.getElementById("spinnerText");
-const centerAction = document.getElementById("centerAction");
+const spinnerSubtext = document.getElementById("spinnerSubtext");
 const unmutePill = document.getElementById("unmutePill");
 const resumePill = document.getElementById("resumePill");
 const resumeText = document.getElementById("resumeText");
-const timeline = document.getElementById("timeline");
-const playedBar = document.getElementById("playedBar");
-const bufferedBar = document.getElementById("bufferedBar");
-const scrubberThumb = document.getElementById("scrubberThumb");
-const timeTooltip = document.getElementById("timeTooltip");
-const timeStamp = document.getElementById("timeStamp");
-const playPauseBtn = document.getElementById("playPauseBtn");
-const playIcon = document.getElementById("playIcon");
-const pauseIcon = document.getElementById("pauseIcon");
-const volBtn = document.getElementById("volBtn");
-const volSlider = document.getElementById("volSlider");
-const settingsBtn = document.getElementById("settingsBtn");
-const settingsMenu = document.getElementById("settingsMenu");
-const serverSelect = document.getElementById("serverSelect");
-const audioFixSwitch = document.getElementById("audioFixSwitch");
-const toastNotice = document.getElementById("toastNotice");
-
-// Quality Elements
-const qualityBtn = document.getElementById("qualityBtn");
-const currentQualityLabel = document.getElementById("currentQualityLabel");
-const qualityMenu = document.getElementById("qualityMenu");
-const qualityOptionsList = document.getElementById("qualityOptionsList");
+const topBar = document.getElementById("topBar");
+const mediaTitleText = document.getElementById("mediaTitleText");
+const mediaSubtitleText = document.getElementById("mediaSubtitleText");
+const mediaBadge = document.getElementById("mediaBadge");
 const topQualityBadge = document.getElementById("topQualityBadge");
-const settingsQualityBadge = document.getElementById("settingsQualityBadge");
-const qualitySelect = document.getElementById("qualitySelect");
+const activeServerLabel = document.getElementById("activeServerLabel");
+const btnEpisodesToggle = document.getElementById("btnEpisodesToggle");
+const btnNextEp = document.getElementById("btnNextEp");
+const toastNotice = document.getElementById("toastNotice");
+const bufferingSpinner = document.getElementById("bufferingSpinner");
+
+function showBuffering() {
+    if (bufferingSpinner) bufferingSpinner.style.display = "flex";
+}
+
+function hideBuffering() {
+    if (bufferingSpinner) bufferingSpinner.style.display = "none";
+}
+
+// Drawer & Modal Elements
+const drawerBackdrop = document.getElementById("drawerBackdrop");
+const episodesDrawer = document.getElementById("episodesDrawer");
+const drawerShowTitle = document.getElementById("drawerShowTitle");
+const seasonSelect = document.getElementById("seasonSelect");
+const episodesCardsList = document.getElementById("episodesCardsList");
+const serverModal = document.getElementById("serverModal");
+const serverModalBackdrop = document.getElementById("serverModalBackdrop");
+const qualityPills = document.getElementById("qualityPills");
+const serverList = document.getElementById("serverList");
+const audioFixSwitch = document.getElementById("audioFixSwitch");
+const nextEpPrompt = document.getElementById("nextEpPrompt");
+const nextPromptThumb = document.getElementById("nextPromptThumb");
+const nextPromptTitle = document.getElementById("nextPromptTitle");
+const nextPromptCountdown = document.getElementById("nextPromptCountdown");
 
 function formatTime(seconds) {
     if (!seconds || isNaN(seconds) || seconds < 0) return "00:00";
@@ -61,29 +78,302 @@ function formatTime(seconds) {
     return `${pad(m)}:${pad(s)}`;
 }
 
-function showToast(text, duration = 2500) {
+function showToast(text, duration = 3000) {
     if (!toastNotice) return;
     toastNotice.innerText = text;
     toastNotice.classList.add("visible");
     setTimeout(() => toastNotice.classList.remove("visible"), duration);
 }
 
-function showCenterIcon(isPlay) {
-    if (!centerAction) return;
-    centerAction.innerText = isPlay ? "▶" : "❚❚";
-    centerAction.classList.add("animate");
-    setTimeout(() => centerAction.classList.remove("animate"), 350);
+/* ─────────────────────────────────────────────────────────────────────────────
+   PROGRESS BAR & DURATION INTERCEPTION ENGINE
+   ───────────────────────────────────────────────────────────────────────────── */
+
+const nativeCurrentTimeDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
+const nativeDurationDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'duration');
+
+// Define robust getters/setters on videoEl so Plyr and HTML5 video are 100% in sync
+try {
+    Object.defineProperty(videoEl, 'duration', {
+        get() {
+            if (totalDuration && totalDuration > 0) return totalDuration;
+            if (nativeDurationDesc) {
+                const raw = nativeDurationDesc.get.call(videoEl);
+                if (raw && !isNaN(raw) && isFinite(raw) && raw > 0) return raw;
+            }
+            return 0;
+        },
+        configurable: true
+    });
+
+    Object.defineProperty(videoEl, 'currentTime', {
+        get() {
+            if (!nativeCurrentTimeDesc) return 0;
+            const raw = nativeCurrentTimeDesc.get.call(videoEl) || 0;
+            if (isAudioTranscode) {
+                return streamTimeOffset + raw;
+            }
+            return raw;
+        },
+        set(targetSec) {
+            seekToTime(targetSec);
+        },
+        configurable: true
+    });
+} catch (e) {
+    console.warn("Could not patch videoEl getters/setters:", e);
 }
 
-/* Idle Controls Auto-Hide */
+let transcodeSeekTimer = null;
+function debouncedTranscodeSeek(targetSec) {
+    clearTimeout(transcodeSeekTimer);
+    showBuffering();
+    transcodeSeekTimer = setTimeout(() => {
+        streamTimeOffset = targetSec;
+        loadVideoStream(targetSec);
+    }, 150);
+}
+
+function seekToTime(targetSec) {
+    targetSec = Math.max(0, Math.min(targetSec, totalDuration || targetSec));
+    showBuffering();
+
+    if (isAudioTranscode && currentStreamData) {
+        debouncedTranscodeSeek(targetSec);
+    } else if (videoEl) {
+        if (nativeCurrentTimeDesc) {
+            nativeCurrentTimeDesc.set.call(videoEl, targetSec);
+        } else {
+            videoEl.currentTime = targetSec;
+        }
+    }
+}
+
+function setTotalDuration(sec) {
+    if (!sec || isNaN(sec) || sec <= 0) return;
+    totalDuration = Math.round(sec);
+    if (plyrInstance) {
+        plyrInstance.config.duration = totalDuration;
+        const durEl = plyrInstance.elements?.display?.duration;
+        if (durEl) durEl.innerText = formatTime(totalDuration);
+        const seekInput = plyrInstance.elements?.inputs?.seek;
+        if (seekInput) {
+            seekInput.setAttribute('aria-valuemax', totalDuration);
+        }
+    }
+    try {
+        videoEl.dispatchEvent(new Event('durationchange'));
+    } catch (e) {}
+    updateProgressBar();
+}
+
+function updateProgressBar() {
+    const cur = getDisplayCurrentTime();
+    const dur = getEffectiveDuration();
+
+    if (dur > 0) {
+        const pct = Math.min(100, Math.max(0, (cur / dur) * 100));
+
+        // Update seek input slider and CSS fill track
+        const seekInput = plyrInstance?.elements?.inputs?.seek;
+        if (seekInput && !plyrInstance?.seeking) {
+            seekInput.value = pct;
+            seekInput.style.setProperty('--value', `${pct}%`);
+            seekInput.setAttribute('aria-valuenow', Math.floor(cur));
+        }
+
+        // Update buffer bar (downloaded stream progress)
+        const bufEl = plyrInstance?.elements?.display?.buffer;
+        if (bufEl && videoEl && videoEl.buffered && videoEl.buffered.length > 0) {
+            try {
+                const lastBufferedEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
+                const totalBufSec = isAudioTranscode ? streamTimeOffset + lastBufferedEnd : lastBufferedEnd;
+                const bufPct = Math.min(100, Math.max(0, (totalBufSec / dur) * 100));
+                bufEl.value = bufPct;
+            } catch (e) {}
+        }
+
+        // Update current time & duration labels
+        const curEl = plyrInstance?.elements?.display?.currentTime;
+        if (curEl) {
+            curEl.innerText = formatTime(cur);
+        }
+
+        const durEl = plyrInstance?.elements?.display?.duration;
+        if (durEl && dur > 0) {
+            durEl.innerText = formatTime(dur);
+        }
+    }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   INITIALIZE PLYR.IO PLAYER
+   ───────────────────────────────────────────────────────────────────────────── */
+
+function initPlyr() {
+    if (plyrInstance) return plyrInstance;
+
+    plyrInstance = new Plyr(videoEl, {
+        controls: [
+            'play-large',
+            'rewind',
+            'play',
+            'fast-forward',
+            'progress',
+            'current-time',
+            'duration',
+            'mute',
+            'volume',
+            'settings',
+            'pip',
+            'fullscreen'
+        ],
+        settings: ['speed'],
+        speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 2] },
+        seekTime: 10,
+        keyboard: { focused: true, global: true },
+        tooltips: { controls: true, seek: true },
+        storage: { enabled: false },
+        duration: totalDuration > 0 ? totalDuration : undefined
+    });
+
+    // Native video listener fallbacks for guaranteed progress bar sync
+    videoEl.addEventListener('timeupdate', updateProgressBar);
+    videoEl.addEventListener('durationchange', updateProgressBar);
+    videoEl.addEventListener('loadedmetadata', updateProgressBar);
+
+    // Direct Seek Input & Scrubber Binding (Click / Drag on Track)
+    setTimeout(() => {
+        const seekInput = plyrInstance.elements?.inputs?.seek;
+        if (seekInput) {
+            seekInput.addEventListener('input', (e) => {
+                const pct = parseFloat(e.target.value);
+                const dur = getEffectiveDuration();
+                if (dur > 0 && !isNaN(pct)) {
+                    const targetSec = (pct / 100) * dur;
+                    const curEl = plyrInstance.elements?.display?.currentTime;
+                    if (curEl) curEl.innerText = formatTime(targetSec);
+                    seekInput.style.setProperty('--value', `${pct}%`);
+                }
+            });
+
+            seekInput.addEventListener('change', (e) => {
+                const pct = parseFloat(e.target.value);
+                const dur = getEffectiveDuration();
+                if (dur > 0 && !isNaN(pct)) {
+                    const targetSec = (pct / 100) * dur;
+                    seekToTime(targetSec);
+                }
+            });
+        }
+    }, 150);
+
+    // Buffering & Loading Animation Handlers
+    plyrInstance.on('waiting', () => {
+        showBuffering();
+    });
+
+    plyrInstance.on('stalled', () => {
+        showBuffering();
+    });
+
+    plyrInstance.on('canplay', () => {
+        hideBuffering();
+        updateProgressBar();
+    });
+
+    plyrInstance.on('seeked', () => {
+        if (videoEl && videoEl.readyState >= 3) {
+            hideBuffering();
+        }
+        updateProgressBar();
+    });
+
+    // Handle Time Update for Progress Bar, Resuming & End-of-Episode Prompt
+    plyrInstance.on('timeupdate', () => {
+        if (bufferingSpinner && bufferingSpinner.style.display === "flex" && !videoEl.paused) {
+            hideBuffering();
+        }
+        updateProgressBar();
+
+        const currentTime = getDisplayCurrentTime();
+        const duration = getEffectiveDuration();
+
+        // Save resume time every few seconds
+        if (resumeStorageKey && currentTime > 10 && duration > 30) {
+            if (currentTime < duration - 15) {
+                localStorage.setItem(resumeStorageKey, Math.floor(currentTime));
+            } else {
+                localStorage.removeItem(resumeStorageKey);
+            }
+        }
+
+        // Check for Next Episode Prompt (last 35s of an episode for TV)
+        if (currentMedia && currentMedia.mediaType === 'tv' && duration > 60 && !nextPromptDismissed) {
+            const timeLeft = duration - currentTime;
+            if (timeLeft <= 35 && timeLeft > 5) {
+                showNextEpisodePrompt();
+            } else if (timeLeft <= 0) {
+                playNextEpisode();
+            }
+        }
+    });
+
+    // Transcode Seeking Support
+    plyrInstance.on('seeking', () => {
+        showBuffering();
+        if (isAudioTranscode && currentStreamData) {
+            const targetTime = plyrInstance.currentTime;
+            if (Math.abs(targetTime - streamTimeOffset) > 2) {
+                debouncedTranscodeSeek(targetTime);
+            }
+        }
+    });
+
+    plyrInstance.on('playing', () => {
+        hideBuffering();
+        updateProgressBar();
+        resetControlsTimer();
+        if (unmutePill) unmutePill.style.display = "none";
+    });
+
+    plyrInstance.on('pause', () => {
+        playerRoot.classList.remove("hide-controls");
+    });
+
+    plyrInstance.on('controlsshown', () => {
+        playerRoot.classList.remove("hide-controls");
+    });
+
+    plyrInstance.on('controlshidden', () => {
+        const isDrawerOpen = episodesDrawer && episodesDrawer.classList.contains("open");
+        const isModalOpen = serverModal && serverModal.classList.contains("open");
+        if (!isDrawerOpen && !isModalOpen) {
+            playerRoot.classList.add("hide-controls");
+        }
+    });
+
+    plyrInstance.on('ended', () => {
+        if (currentMedia && currentMedia.mediaType === 'tv') {
+            playNextEpisode();
+        }
+    });
+
+    return plyrInstance;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   IDLE CONTROLS AUTO-HIDE & MOBILE TOUCH HANDLING
+   ───────────────────────────────────────────────────────────────────────────── */
+
 function resetControlsTimer() {
     playerRoot.classList.remove("hide-controls");
     clearTimeout(controlsTimeout);
-    if (!video.paused) {
+    if (plyrInstance && plyrInstance.playing) {
         controlsTimeout = setTimeout(() => {
-            const isMenuOpen = (settingsMenu && settingsMenu.classList.contains("open")) ||
-                               (qualityMenu && qualityMenu.classList.contains("open"));
-            if (!isMenuOpen && !isDragging) {
+            const isDrawerOpen = episodesDrawer && episodesDrawer.classList.contains("open");
+            const isModalOpen = serverModal && serverModal.classList.contains("open");
+            if (!isDrawerOpen && !isModalOpen) {
                 playerRoot.classList.add("hide-controls");
             }
         }, 2800);
@@ -93,487 +383,190 @@ function resetControlsTimer() {
 playerRoot.addEventListener("mousemove", resetControlsTimer);
 playerRoot.addEventListener("click", resetControlsTimer);
 
-/* Play / Pause */
-function togglePlay() {
-    if (video.paused) {
-        video.play().catch(() => {});
-        showCenterIcon(true);
-    } else {
-        video.pause();
-        showCenterIcon(false);
-    }
+// Mobile Double-Tap to Seek (10s back / 10s forward)
+let lastTapTime = 0;
+let lastTapX = 0;
+const rippleLeft = document.getElementById("rippleLeft");
+const rippleRight = document.getElementById("rippleRight");
+
+function showSeekRipple(isRight) {
+    const el = isRight ? rippleRight : rippleLeft;
+    if (!el) return;
+    el.classList.add("active");
+    clearTimeout(el._hideTimer);
+    el._hideTimer = setTimeout(() => {
+        el.classList.remove("active");
+    }, 450);
 }
 
-video.addEventListener("play", () => {
-    if (playIcon) playIcon.style.display = "none";
-    if (pauseIcon) pauseIcon.style.display = "block";
+function handleMobileDoubleTap(clientX) {
+    const now = Date.now();
+    const dt = now - lastTapTime;
+    const rect = playerRoot.getBoundingClientRect();
+    const xRatio = (clientX - rect.left) / rect.width;
+
+    if (dt > 0 && dt < 320 && Math.abs(clientX - lastTapX) < 90) {
+        if (xRatio < 0.4) {
+            // Rewind 10s
+            if (plyrInstance) plyrInstance.rewind(10);
+            showSeekRipple(false);
+            lastTapTime = 0;
+            return true;
+        } else if (xRatio > 0.6) {
+            // Forward 10s
+            if (plyrInstance) plyrInstance.forward(10);
+            showSeekRipple(true);
+            lastTapTime = 0;
+            return true;
+        }
+    }
+    lastTapTime = now;
+    lastTapX = clientX;
+    return false;
+}
+
+playerRoot.addEventListener("touchstart", (e) => {
     resetControlsTimer();
-});
-
-video.addEventListener("pause", () => {
-    if (playIcon) playIcon.style.display = "block";
-    if (pauseIcon) pauseIcon.style.display = "none";
-    playerRoot.classList.remove("hide-controls");
-});
-
-function skip(deltaSeconds) {
-    const current = getDisplayCurrentTime();
-    const dur = getEffectiveDuration();
-    const target = Math.max(0, Math.min(dur || Infinity, current + deltaSeconds));
-    seekTo(target);
-    showCenterIcon(deltaSeconds > 0);
-}
-
-/* Volume & Mute */
-function updateVolume(val) {
-    video.volume = parseFloat(val);
-    video.muted = video.volume === 0;
-    syncVolumeUI();
-}
-
-function toggleMute() {
-    video.muted = !video.muted;
-    if (!video.muted && video.volume === 0) {
-        video.volume = 1;
-        if (volSlider) volSlider.value = 1;
-    }
-    syncVolumeUI();
-}
-
-function syncVolumeUI() {
-    const volHigh = document.getElementById("volHighIcon");
-    const volMute = document.getElementById("volMuteIcon");
-    if (video.muted || video.volume === 0) {
-        if (volHigh) volHigh.style.display = "none";
-        if (volMute) volMute.style.display = "block";
-        if (volSlider) volSlider.value = 0;
-    } else {
-        if (volHigh) volHigh.style.display = "block";
-        if (volMute) volMute.style.display = "none";
-        if (volSlider) volSlider.value = video.volume;
-    }
-}
-
-function handleUnmuteClick() {
-    video.muted = false;
-    video.volume = 1;
-    if (volSlider) volSlider.value = 1;
-    syncVolumeUI();
-    if (unmutePill) unmutePill.style.display = "none";
-    video.play().catch(() => {});
-}
-
-/* Fullscreen & Picture-in-Picture */
-function toggleFullscreen() {
-    if (!document.fullscreenElement) {
-        playerRoot.requestFullscreen().catch(() => {});
-    } else {
-        document.exitFullscreen().catch(() => {});
-    }
-}
-
-function togglePip() {
-    if (document.pictureInPictureElement) {
-        document.exitPictureInPicture().catch(() => {});
-    } else if (video && video.requestPictureInPicture) {
-        video.requestPictureInPicture().catch(() => {});
-    }
-}
-
-/* Resume Pill */
-function closeResumePill() {
-    if (resumePill) resumePill.style.display = "none";
-}
-
-function startOver() {
-    closeResumePill();
-    if (resumeStorageKey) localStorage.removeItem(resumeStorageKey);
-    seekTo(0);
-}
-
-/* Duration & Progress Calculations */
-function pollDuration(infoHash) {
-    clearInterval(durationPollTimer);
-    let attempts = 0;
-    durationPollTimer = setInterval(async () => {
-        attempts++;
-        if (attempts > 50 || hasProbedDuration) {
-            clearInterval(durationPollTimer);
+    if (e.touches && e.touches.length === 1) {
+        const touch = e.touches[0];
+        // Skip double tap if interacting with interactive UI elements
+        if (e.target.closest("#topBar") ||
+            e.target.closest("#episodesDrawer") ||
+            e.target.closest("#serverModal") ||
+            e.target.closest("#nextEpPrompt") ||
+            e.target.closest(".plyr__controls")) {
             return;
         }
-        try {
-            const res = await fetch("/api/duration/" + infoHash);
-            if (res.ok) {
-                const d = await res.json();
-                if (d.duration && d.duration > 0) {
-                    totalDuration = d.duration;
-                    hasProbedDuration = true;
-                    updateProgressUI();
-                    updateBufferedBar();
-                    clearInterval(durationPollTimer);
-                }
+        handleMobileDoubleTap(touch.clientX);
+    }
+}, { passive: true });
+
+// Mobile Touch Swipe-to-Dismiss for Drawer & Server Modal
+let drawerStartX = 0;
+if (episodesDrawer) {
+    episodesDrawer.addEventListener("touchstart", (e) => {
+        if (e.touches.length === 1) drawerStartX = e.touches[0].clientX;
+    }, { passive: true });
+
+    episodesDrawer.addEventListener("touchend", (e) => {
+        if (e.changedTouches.length === 1) {
+            const dx = e.changedTouches[0].clientX - drawerStartX;
+            if (dx > 75) {
+                closeEpisodesDrawer();
             }
-        } catch (e) {}
-    }, 1500);
+        }
+    }, { passive: true });
+}
+
+let modalStartY = 0;
+if (serverModal) {
+    serverModal.addEventListener("touchstart", (e) => {
+        if (e.touches.length === 1) modalStartY = e.touches[0].clientY;
+    }, { passive: true });
+
+    serverModal.addEventListener("touchend", (e) => {
+        if (e.changedTouches.length === 1) {
+            const dy = e.changedTouches[0].clientY - modalStartY;
+            if (dy > 70 && window.innerWidth <= 640) {
+                closeServerModal();
+            }
+        }
+    }, { passive: true });
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   STREAM PLAYBACK & DURATION ENGINE
+   ───────────────────────────────────────────────────────────────────────────── */
+
+function getDisplayCurrentTime() {
+    if (!videoEl) return 0;
+    if (nativeCurrentTimeDesc) {
+        const raw = nativeCurrentTimeDesc.get.call(videoEl) || 0;
+        return isAudioTranscode ? streamTimeOffset + raw : raw;
+    }
+    return videoEl.currentTime || 0;
 }
 
 function getEffectiveDuration() {
-    if (totalDuration > 0) return totalDuration;
-    if (video.duration && isFinite(video.duration) && video.duration > 0) return video.duration;
+    if (totalDuration && totalDuration > 0) return totalDuration;
+    if (nativeDurationDesc) {
+        const raw = nativeDurationDesc.get.call(videoEl);
+        if (raw && !isNaN(raw) && isFinite(raw) && raw > 0) return raw;
+    }
     return 0;
 }
 
-function getDisplayCurrentTime() {
-    if (isAudioTranscode) {
-        return streamTimeOffset + (video.currentTime || 0);
-    }
-    return video.currentTime || 0;
-}
-
-function updateProgressUI(customTime = null) {
-    const current = customTime !== null ? customTime : getDisplayCurrentTime();
-    const dur = getEffectiveDuration();
-
-    if (dur > 0) {
-        const pct = Math.min(100, Math.max(0, (current / dur) * 100));
-        if (playedBar) playedBar.style.width = pct + "%";
-        if (scrubberThumb) scrubberThumb.style.left = pct + "%";
-        if (timeStamp) timeStamp.innerText = `${formatTime(current)} / ${formatTime(dur)}`;
-    } else {
-        if (playedBar) playedBar.style.width = "0%";
-        if (scrubberThumb) scrubberThumb.style.left = "0%";
-        if (timeStamp) timeStamp.innerText = `${formatTime(current)} / --:--`;
-    }
-}
-
-function updateBufferedBar() {
-    const dur = getEffectiveDuration();
-    if (dur > 0 && video.buffered && video.buffered.length > 0 && bufferedBar) {
-        try {
-            let maxBuf = 0;
-            for (let i = 0; i < video.buffered.length; i++) {
-                if (video.buffered.end(i) > maxBuf) maxBuf = video.buffered.end(i);
-            }
-            const effectiveBuf = isAudioTranscode ? (streamTimeOffset + maxBuf) : maxBuf;
-            const pct = Math.min(100, Math.max(0, (effectiveBuf / dur) * 100));
-            bufferedBar.style.width = pct + "%";
-        } catch (e) {}
-    }
-}
-
-video.addEventListener("progress", updateBufferedBar);
-
-video.addEventListener("timeupdate", () => {
-    if (isSeeking || isDragging) return;
-    updateProgressUI();
-    updateBufferedBar();
-
-    const current = getDisplayCurrentTime();
-    const dur = getEffectiveDuration();
-    if (resumeStorageKey && current > 5 && dur > 30 && current < dur - 30) {
-        localStorage.setItem(resumeStorageKey, Math.floor(current));
-    }
-});
-
-video.addEventListener("loadedmetadata", () => {
-    if (!isAudioTranscode && isFinite(video.duration) && video.duration > 300) {
-        totalDuration = video.duration;
-    }
-    updateProgressUI();
-    updateBufferedBar();
-});
-
-video.addEventListener("durationchange", () => {
-    if (!isAudioTranscode && isFinite(video.duration) && video.duration > 300) {
-        totalDuration = video.duration;
-    }
-    updateProgressUI();
-    updateBufferedBar();
-});
-
-/* Pointer Scrubbing & Seeking */
-function getTimelineTimeFromEvent(e) {
-    const rect = timeline.getBoundingClientRect();
-    const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
-    const ratio = rect.width > 0 ? (x / rect.width) : 0;
-    const dur = getEffectiveDuration();
-    return { ratio, time: ratio * dur, x };
-}
-
-function seekTo(targetTime) {
-    const dur = getEffectiveDuration();
-    const bounded = Math.max(0, Math.min(dur || Infinity, targetTime));
-
-    if (isAudioTranscode) {
-        streamTimeOffset = Math.floor(bounded);
-        updateProgressUI(bounded);
-        spinner.style.display = "flex";
-        spinnerText.innerText = `Seeking to ${formatTime(bounded)}...`;
-
-        const base = currentStreamData ? currentStreamData.transcodeUrl : (activeSource ? activeSource.transcodeUrl : "");
-        video.src = `${base}&t=${streamTimeOffset}`;
-        video.currentTime = 0;
-        video.play().catch(() => {});
-    } else {
-        video.currentTime = bounded;
-        updateProgressUI(bounded);
-        updateBufferedBar();
-        spinner.style.display = "flex";
-        spinnerText.innerText = `Fast-forwarding to ${formatTime(bounded)}...`;
-    }
-}
-
-video.addEventListener("seeking", () => {
-    spinner.style.display = "flex";
-    const current = getDisplayCurrentTime();
-    spinnerText.innerText = `Buffering at ${formatTime(current)}...`;
-});
-
-video.addEventListener("seeked", () => {
-    spinner.style.display = "none";
-});
-
-video.addEventListener("canplay", () => {
-    spinner.style.display = "none";
-});
-
-if (timeline) {
-    timeline.addEventListener("pointerdown", (e) => {
-        if (e.button !== 0) return;
-        isDragging = true;
-        isSeeking = true;
-        timeline.classList.add("dragging");
-        try { timeline.setPointerCapture(e.pointerId); } catch (err) {}
-
-        const { ratio, time } = getTimelineTimeFromEvent(e);
-        if (playedBar) playedBar.style.width = (ratio * 100) + "%";
-        if (scrubberThumb) scrubberThumb.style.left = (ratio * 100) + "%";
-        updateProgressUI(time);
-
-        if (timeTooltip) {
-            timeTooltip.style.display = "block";
-            const tipX = Math.max(24, Math.min(timeline.clientWidth - 24, ratio * timeline.clientWidth));
-            timeTooltip.style.left = tipX + "px";
-            timeTooltip.innerText = formatTime(time);
-        }
-    });
-
-    timeline.addEventListener("pointermove", (e) => {
-        const { ratio, time } = getTimelineTimeFromEvent(e);
-        if (timeTooltip) {
-            const tipX = Math.max(24, Math.min(timeline.clientWidth - 24, ratio * timeline.clientWidth));
-            timeTooltip.style.left = tipX + "px";
-            timeTooltip.innerText = formatTime(time);
-        }
-
-        if (isDragging) {
-            if (playedBar) playedBar.style.width = (ratio * 100) + "%";
-            if (scrubberThumb) scrubberThumb.style.left = (ratio * 100) + "%";
-            updateProgressUI(time);
-        } else {
-            const dur = getEffectiveDuration();
-            if (dur > 0 && timeTooltip) {
-                timeTooltip.style.display = "block";
-            }
-        }
-    });
-
-    function handlePointerUp(e) {
-        if (!isDragging) return;
-        isDragging = false;
-        isSeeking = false;
-        timeline.classList.remove("dragging");
-        try { timeline.releasePointerCapture(e.pointerId); } catch (err) {}
-
-        const { time: finalTime } = getTimelineTimeFromEvent(e);
-        seekTo(finalTime);
-    }
-
-    timeline.addEventListener("pointerup", handlePointerUp);
-    timeline.addEventListener("pointercancel", handlePointerUp);
-    timeline.addEventListener("mouseleave", () => {
-        if (!isDragging && timeTooltip) {
-            timeTooltip.style.display = "none";
-        }
-    });
-}
-
-/* Quality & Settings Menus */
-function toggleSettings() {
-    if (qualityMenu && qualityMenu.classList.contains("open")) {
-        qualityMenu.classList.remove("open");
-    }
-    if (settingsMenu) settingsMenu.classList.toggle("open");
-}
-
-function toggleQualityMenu() {
-    if (settingsMenu && settingsMenu.classList.contains("open")) {
-        settingsMenu.classList.remove("open");
-    }
-    if (qualityMenu) qualityMenu.classList.toggle("open");
-}
-
-function closeQualityMenu() {
-    if (qualityMenu) qualityMenu.classList.remove("open");
-}
-
-document.addEventListener("click", (e) => {
-    if (settingsMenu && settingsMenu.classList.contains("open") && !settingsMenu.contains(e.target) && !settingsBtn.contains(e.target)) {
-        settingsMenu.classList.remove("open");
-    }
-    if (qualityMenu && qualityMenu.classList.contains("open") && !qualityMenu.contains(e.target) && !qualityBtn.contains(e.target)) {
-        closeQualityMenu();
-    }
-});
-
-function updateQualityUI(quality) {
-    currentQuality = quality;
-    if (currentQualityLabel) currentQualityLabel.innerText = quality;
-    if (topQualityBadge) topQualityBadge.innerText = quality;
-    if (settingsQualityBadge) settingsQualityBadge.innerText = `${quality} HD`;
-    if (qualitySelect) qualitySelect.value = quality;
-
-    document.querySelectorAll(".quality-option").forEach((el) => {
-        if (el.dataset.quality === quality) {
-            el.classList.add("active");
-        } else {
-            el.classList.remove("active");
-        }
-    });
-}
-
-function populateQualityOptions(qualities) {
-    availableQualities = qualities && qualities.length > 0 ? qualities : ["1080p"];
-
-    if (qualityOptionsList) {
-        qualityOptionsList.innerHTML = "";
-
-        const autoOpt = document.createElement("div");
-        autoOpt.className = "quality-option" + (currentQuality === "Auto" ? " active" : "");
-        autoOpt.dataset.quality = "Auto";
-        autoOpt.innerText = "Auto";
-        autoOpt.onclick = () => handleQualitySelect("Auto");
-        qualityOptionsList.appendChild(autoOpt);
-
-        availableQualities.forEach((q) => {
-            const opt = document.createElement("div");
-            opt.className = "quality-option" + (currentQuality === q ? " active" : "");
-            opt.dataset.quality = q;
-            opt.innerText = q;
-            opt.onclick = () => handleQualitySelect(q);
-            qualityOptionsList.appendChild(opt);
-        });
-    }
-
-    if (qualitySelect) {
-        qualitySelect.innerHTML = "";
-        const autoOpt = document.createElement("option");
-        autoOpt.value = "Auto";
-        autoOpt.innerText = "Auto (Best Available)";
-        qualitySelect.appendChild(autoOpt);
-
-        availableQualities.forEach((q) => {
-            const opt = document.createElement("option");
-            opt.value = q;
-            opt.innerText = `${q} High Definition`;
-            qualitySelect.appendChild(opt);
-        });
-        qualitySelect.value = currentQuality;
-    }
-}
-
-function handleQualitySelect(selectedQuality) {
-    closeQualityMenu();
-    if (selectedQuality === currentQuality && activeSource) return;
-
-    showToast(`Switching quality to ${selectedQuality}...`);
-    updateQualityUI(selectedQuality);
-
-    let targetSource = null;
-    if (selectedQuality === "Auto") {
-        targetSource = currentSources[0];
-    } else {
-        targetSource = currentSources.find((s) => s.quality === selectedQuality) || currentSources[0];
-    }
-
-    if (targetSource) {
-        const idx = currentSources.findIndex((s) => s.id === targetSource.id);
-        if (idx !== -1 && serverSelect) {
-            serverSelect.value = idx;
-        }
-        startStreamForSource(targetSource);
-    }
-}
-
-function handleServerChange(index) {
-    const s = currentSources[index];
-    if (s) {
-        showToast(`Connecting to ${s.label}...`);
-        if (s.quality) {
-            updateQualityUI(s.quality);
-        }
-        startStreamForSource(s);
-    }
-}
-
-function toggleAudioTranscode() {
-    const prevTime = getDisplayCurrentTime();
-    isAudioTranscode = audioFixSwitch.checked;
-    showToast(isAudioTranscode ? "🔊 Stereo AAC transcode enabled" : "⚡ Direct stream enabled");
-    if (currentStreamData) {
-        seekTo(prevTime);
-    }
-}
-
-/* Stream Loading */
 function loadVideoStream(startTime = 0) {
     if (!currentStreamData) return;
 
-    const wasPlaying = !video.paused;
-    let streamUrl = "";
+    let targetUrl = currentStreamData.streamUrl;
     if (isAudioTranscode) {
-        streamTimeOffset = Math.floor(startTime);
-        streamUrl = `${currentStreamData.transcodeUrl}&t=${streamTimeOffset}`;
-    } else {
-        streamTimeOffset = 0;
-        streamUrl = currentStreamData.streamUrl;
+        streamTimeOffset = startTime;
+        targetUrl = `${currentStreamData.transcodeUrl}&t=${startTime}`;
     }
 
-    video.src = streamUrl;
+    spinner.style.display = "none";
+    showBuffering();
 
-    spinner.style.display = "flex";
-    spinnerText.innerText = "Buffering video stream...";
+    const wasPlaying = plyrInstance ? plyrInstance.playing : true;
+    videoEl.src = targetUrl;
 
-    video.addEventListener("loadedmetadata", function onLoaded() {
-        video.removeEventListener("loadedmetadata", onLoaded);
+    videoEl.addEventListener("loadedmetadata", function onLoadedMeta() {
+        videoEl.removeEventListener("loadedmetadata", onLoadedMeta);
         if (!isAudioTranscode && startTime > 0) {
-            video.currentTime = startTime;
+            videoEl.currentTime = startTime;
         }
         if (wasPlaying) {
-            video.play().catch(() => {});
+            plyrInstance.play().catch(() => {});
         }
     });
 
-    const playPromise = video.play();
-    if (playPromise !== undefined) {
-        playPromise.then(() => {
-            if (video.muted && unmutePill) {
-                unmutePill.style.display = "flex";
+    plyrInstance.play().then(() => {
+        if (videoEl.muted && unmutePill) {
+            unmutePill.style.display = "flex";
+        }
+    }).catch(() => {
+        videoEl.muted = true;
+        plyrInstance.play().then(() => {
+            if (unmutePill) unmutePill.style.display = "flex";
+        }).catch(() => {});
+    });
+}
+
+function pollDuration(infoHash) {
+    if (hasProbedDuration) return;
+    clearInterval(durationPollTimer);
+
+    let attempts = 0;
+    durationPollTimer = setInterval(async () => {
+        attempts++;
+        if (attempts > 12 || hasProbedDuration) {
+            clearInterval(durationPollTimer);
+            return;
+        }
+
+        try {
+            const res = await fetch(`/api/duration/${infoHash}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            if (data.duration && data.duration > 0) {
+                setTotalDuration(data.duration);
+                hasProbedDuration = true;
+                clearInterval(durationPollTimer);
             }
-        }).catch(() => {
-            video.muted = true;
-            updateVolume(0);
-            video.play().then(() => {
-                if (unmutePill) unmutePill.style.display = "flex";
-            }).catch(() => {});
-        });
-    }
+        } catch (e) {}
+    }, 2000);
 }
 
 async function startStreamForSource(source) {
     activeSource = source;
     spinner.style.display = "flex";
-    spinnerText.innerText = `Connecting to stream (${source.quality || "HD"})...`;
+    spinnerText.innerText = `Connecting to ${source.label || "stream"}...`;
+    spinnerSubtext.innerText = "Synchronizing peer swarm...";
+
+    if (activeServerLabel) {
+        activeServerLabel.innerText = source.label || `Server (${source.quality || "HD"})`;
+    }
 
     try {
         const res = await fetch("/api/source/select", {
@@ -589,14 +582,13 @@ async function startStreamForSource(source) {
         hasProbedDuration = false;
 
         if (data.duration && data.duration > 0) {
-            totalDuration = data.duration;
+            setTotalDuration(data.duration);
             hasProbedDuration = true;
-            updateProgressUI();
         } else {
             pollDuration(data.infoHash);
         }
 
-        // Set audio transcode
+        // Set audio transcode switch
         if (data.needsTranscode) {
             isAudioTranscode = true;
             if (audioFixSwitch) audioFixSwitch.checked = true;
@@ -605,7 +597,7 @@ async function startStreamForSource(source) {
             if (audioFixSwitch) audioFixSwitch.checked = false;
         }
 
-        // Check for saved resume time or preserve mid-stream seek
+        // Check for resume time
         const currentPos = getDisplayCurrentTime();
         let initialTime = currentPos > 5 ? currentPos : 0;
 
@@ -628,36 +620,303 @@ async function startStreamForSource(source) {
     }
 }
 
-/* Keyboard Hotkeys */
-document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+/* ─────────────────────────────────────────────────────────────────────────────
+   RESUME & UNMUTE ACTIONS
+   ───────────────────────────────────────────────────────────────────────────── */
 
-    if (e.code === "Space" || e.code === "KeyK") {
-        e.preventDefault();
-        togglePlay();
-    } else if (e.code === "ArrowLeft") {
-        e.preventDefault();
-        skip(-10);
-    } else if (e.code === "ArrowRight") {
-        e.preventDefault();
-        skip(10);
-    } else if (e.code === "KeyF") {
-        e.preventDefault();
-        toggleFullscreen();
-    } else if (e.code === "KeyM") {
-        e.preventDefault();
-        toggleMute();
-    } else if (e.code === "KeyP") {
-        e.preventDefault();
-        togglePip();
+function handleUnmuteClick() {
+    if (videoEl) videoEl.muted = false;
+    if (plyrInstance) plyrInstance.muted = false;
+    if (unmutePill) unmutePill.style.display = "none";
+}
+
+function startOver() {
+    if (resumeStorageKey) localStorage.removeItem(resumeStorageKey);
+    if (resumePill) resumePill.style.display = "none";
+    if (isAudioTranscode) {
+        streamTimeOffset = 0;
+        loadVideoStream(0);
+    } else if (videoEl) {
+        videoEl.currentTime = 0;
     }
-});
+}
 
-/* Initialize Player via SSE — streams data in two fast phases:
- * Phase 1 (meta): TMDB info + sources arrive quickly → UI renders immediately
- * Phase 2 (stream): Torrent ready → video auto-starts without a second request
- */
+function closeResumePill() {
+    if (resumePill) resumePill.style.display = "none";
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   NETFLIX / HBO STYLE SEASONS & EPISODES DRAWER
+   ───────────────────────────────────────────────────────────────────────────── */
+
+function toggleEpisodesDrawer() {
+    if (!episodesDrawer) return;
+    if (episodesDrawer.classList.contains("open")) {
+        closeEpisodesDrawer();
+    } else {
+        openEpisodesDrawer();
+    }
+}
+
+function openEpisodesDrawer() {
+    if (!episodesDrawer || !drawerBackdrop) return;
+    closeServerModal();
+    episodesDrawer.classList.add("open");
+    drawerBackdrop.classList.add("active");
+    playerRoot.classList.remove("hide-controls");
+}
+
+function closeEpisodesDrawer() {
+    if (!episodesDrawer || !drawerBackdrop) return;
+    episodesDrawer.classList.remove("open");
+    drawerBackdrop.classList.remove("active");
+}
+
+function renderSeasonSelector(seasons, activeSeasonNum) {
+    if (!seasonSelect || !seasons || seasons.length === 0) return;
+    seasonSelect.innerHTML = "";
+
+    seasons.forEach((s) => {
+        const opt = document.createElement("option");
+        opt.value = s.seasonNumber;
+        opt.innerText = `${s.name || `Season ${s.seasonNumber}`} (${s.episodeCount || 0} Episodes)`;
+        if (s.seasonNumber === activeSeasonNum) opt.selected = true;
+        seasonSelect.appendChild(opt);
+    });
+}
+
+async function onSeasonChange(seasonNumber) {
+    const seasonNum = parseInt(seasonNumber, 10);
+    if (isNaN(seasonNum)) return;
+
+    if (!currentMedia || !currentMedia.tmdb) return;
+    const tmdbId = currentMedia.tmdb.id;
+
+    // Check if season episodes are cached
+    if (seasonEpisodesCache.has(seasonNum)) {
+        renderEpisodeCards(seasonEpisodesCache.get(seasonNum), seasonNum);
+        return;
+    }
+
+    if (episodesCardsList) {
+        episodesCardsList.innerHTML = `<div style="text-align:center; padding: 40px; color:#94a3b8;">Loading Season ${seasonNum} episodes...</div>`;
+    }
+
+    try {
+        const res = await fetch(`/api/tv/${tmdbId}/season/${seasonNum}/episodes`);
+        const data = await res.json();
+        const eps = data.episodes || [];
+        seasonEpisodesCache.set(seasonNum, eps);
+        renderEpisodeCards(eps, seasonNum);
+    } catch (err) {
+        if (episodesCardsList) {
+            episodesCardsList.innerHTML = `<div style="text-align:center; padding: 40px; color:#ef4444;">Failed to load episodes.</div>`;
+        }
+    }
+}
+
+function renderEpisodeCards(episodes, seasonNum) {
+    if (!episodesCardsList || !episodes) return;
+    episodesCardsList.innerHTML = "";
+
+    const activeEpNum = currentMedia && currentMedia.tmdb ? currentMedia.tmdb.episode : 1;
+    const activeSeasonNum = currentMedia && currentMedia.tmdb ? currentMedia.tmdb.season : 1;
+    const fallbackImage = (currentMedia && currentMedia.tmdb && currentMedia.tmdb.backdrop) || "/favicon.ico";
+
+    episodes.forEach((ep) => {
+        const isCurrentlyPlaying = (seasonNum === activeSeasonNum) && (ep.episodeNumber === activeEpNum);
+
+        const card = document.createElement("div");
+        card.className = `episode-card${isCurrentlyPlaying ? " active" : ""}`;
+        card.onclick = () => selectEpisodeToPlay(seasonNum, ep.episodeNumber);
+
+        const stillUrl = ep.still || fallbackImage;
+
+        card.innerHTML = `
+            <div class="episode-thumb-wrap">
+                <img class="episode-thumb" src="${stillUrl}" alt="${ep.name}" loading="lazy" onerror="this.src='${fallbackImage}'">
+                <div class="episode-play-overlay">
+                    <div class="play-circle">▶</div>
+                </div>
+                ${ep.runtime ? `<div class="episode-runtime-badge">${ep.runtime}m</div>` : ""}
+            </div>
+            <div class="episode-info">
+                <div class="episode-title-row">
+                    <div class="episode-num-title">${ep.episodeNumber}. ${ep.name}</div>
+                    ${isCurrentlyPlaying ? `<span class="active-playing-tag">▶ PLAYING</span>` : ""}
+                </div>
+                <div class="episode-synopsis">${ep.overview || "No synopsis available for this episode."}</div>
+            </div>
+        `;
+
+        episodesCardsList.appendChild(card);
+    });
+}
+
+function selectEpisodeToPlay(seasonNum, episodeNum) {
+    if (!currentMedia || !currentMedia.tmdb) return;
+    const activeEpNum = currentMedia.tmdb.episode;
+    const activeSeasonNum = currentMedia.tmdb.season;
+
+    if (seasonNum === activeSeasonNum && episodeNum === activeEpNum) {
+        closeEpisodesDrawer();
+        return;
+    }
+
+    const tmdbId = currentMedia.tmdb.id;
+    window.location.href = `/tv/${tmdbId}/${seasonNum}/${episodeNum}`;
+}
+
+function playNextEpisode() {
+    if (!currentMedia || currentMedia.mediaType !== 'tv') return;
+    const tmdb = currentMedia.tmdb;
+    const nextEp = tmdb.episode + 1;
+    const seasonNum = tmdb.season;
+
+    // Check if next episode exists in current season
+    const currentSeasonEps = seasonEpisodesCache.get(seasonNum) || (tmdb.episodes || []);
+    const existsInSeason = currentSeasonEps.some(e => e.episodeNumber === nextEp);
+
+    if (existsInSeason) {
+        window.location.href = `/tv/${tmdb.id}/${seasonNum}/${nextEp}`;
+    } else {
+        // Try next season episode 1
+        const nextSeason = seasonNum + 1;
+        const seasonExists = (tmdb.seasons || []).some(s => s.seasonNumber === nextSeason);
+        if (seasonExists) {
+            window.location.href = `/tv/${tmdb.id}/${nextSeason}/1`;
+        } else {
+            showToast("You've reached the end of the series!");
+        }
+    }
+}
+
+function showNextEpisodePrompt() {
+    if (!nextEpPrompt || nextPromptDismissed) return;
+    const tmdb = currentMedia && currentMedia.tmdb;
+    if (!tmdb) return;
+
+    const nextEpNum = tmdb.episode + 1;
+    const currentSeasonEps = seasonEpisodesCache.get(tmdb.season) || (tmdb.episodes || []);
+    const nextEpData = currentSeasonEps.find(e => e.episodeNumber === nextEpNum);
+
+    if (!nextEpData) return;
+
+    if (nextPromptTitle) nextPromptTitle.innerText = `${nextEpNum}. ${nextEpData.name}`;
+    if (nextPromptThumb) nextPromptThumb.src = nextEpData.still || tmdb.backdrop || "";
+
+    nextEpPrompt.style.display = "flex";
+
+    let countdown = 10;
+    if (nextPromptCountdown) nextPromptCountdown.innerText = countdown;
+
+    clearInterval(nextCountdownTimer);
+    nextCountdownTimer = setInterval(() => {
+        countdown--;
+        if (nextPromptCountdown) nextPromptCountdown.innerText = countdown;
+        if (countdown <= 0) {
+            clearInterval(nextCountdownTimer);
+            playNextEpisode();
+        }
+    }, 1000);
+}
+
+function dismissNextPrompt() {
+    nextPromptDismissed = true;
+    clearInterval(nextCountdownTimer);
+    if (nextEpPrompt) nextEpPrompt.style.display = "none";
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   SERVER & QUALITY SETTINGS MODAL
+   ───────────────────────────────────────────────────────────────────────────── */
+
+function toggleServerModal() {
+    if (!serverModal) return;
+    if (serverModal.classList.contains("open")) {
+        closeServerModal();
+    } else {
+        openServerModal();
+    }
+}
+
+function openServerModal() {
+    if (!serverModal || !serverModalBackdrop) return;
+    closeEpisodesDrawer();
+    serverModal.classList.add("open");
+    serverModalBackdrop.classList.add("active");
+    playerRoot.classList.remove("hide-controls");
+}
+
+function closeServerModal() {
+    if (!serverModal || !serverModalBackdrop) return;
+    serverModal.classList.remove("open");
+    serverModalBackdrop.classList.remove("active");
+}
+
+function populateQualityPills(qualities) {
+    if (!qualityPills) return;
+    qualityPills.innerHTML = "";
+
+    const allQualities = ["Auto", ...(qualities || ["1080p", "720p"])];
+    allQualities.forEach((q) => {
+        const pill = document.createElement("button");
+        pill.className = `quality-pill${q === currentQuality ? " active" : ""}`;
+        pill.innerText = q;
+        pill.onclick = () => selectQuality(q);
+        qualityPills.appendChild(pill);
+    });
+}
+
+function selectQuality(q) {
+    currentQuality = q;
+    populateQualityPills(availableQualities);
+    if (topQualityBadge) topQualityBadge.innerText = q;
+
+    if (q === "Auto") {
+        if (currentSources.length > 0) startStreamForSource(currentSources[0]);
+    } else {
+        const matched = currentSources.find(s => s.quality === q) || currentSources[0];
+        if (matched) startStreamForSource(matched);
+    }
+    closeServerModal();
+}
+
+function populateServerList(sources) {
+    if (!serverList) return;
+    serverList.innerHTML = "";
+
+    sources.forEach((s, idx) => {
+        const item = document.createElement("div");
+        const isActive = activeSource && (activeSource.infoHash === s.infoHash);
+        item.className = `server-item${isActive ? " active" : ""}`;
+        item.innerHTML = `
+            <span>${s.label || `Server ${idx + 1} (${s.quality || "HD"})`}</span>
+            ${isActive ? `<span class="server-check">✓ Active</span>` : ""}
+        `;
+        item.onclick = () => {
+            startStreamForSource(s);
+            populateServerList(currentSources);
+            closeServerModal();
+        };
+        serverList.appendChild(item);
+    });
+}
+
+function toggleAudioTranscode() {
+    isAudioTranscode = audioFixSwitch ? audioFixSwitch.checked : !isAudioTranscode;
+    const currentPos = getDisplayCurrentTime();
+    showToast(isAudioTranscode ? "🔊 Audio transcode enabled" : "⚡ Direct video enabled");
+    loadVideoStream(currentPos);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   INITIALIZE PLAYER VIA SSE STREAM PIPELINE
+   ───────────────────────────────────────────────────────────────────────────── */
+
 async function initPlayer() {
+    initPlyr();
+
     const path = window.location.pathname;
     const movieMatch = path.match(/^\/movie\/([0-9]+)/i);
     const tvMatch = path.match(/^\/tv\/([0-9]+)\/([0-9]+)(?:\/(?:epesode\/)?([0-9]+))?/i);
@@ -682,204 +941,215 @@ async function initPlayer() {
 
     spinner.style.display = "flex";
     spinnerText.innerText = "Finding the best stream...";
+    spinnerSubtext.innerText = "Searching high-speed sources";
 
-    return new Promise((resolve) => {
-        // Use SSE to receive media data as it becomes available
-        const evtSrc = new EventSource(apiUrl, {
-            // SSE requires GET — headers not directly settable, but server
-            // detects EventSource via Accept: text/event-stream automatically
-        });
+    fetchSSE(apiUrl);
 
-        // Workaround: EventSource doesn't allow custom headers in browser.
-        // We fetch with Accept header instead, and parse the SSE stream manually.
-        evtSrc.close();
+    function fetchSSE(url) {
+        const ctrl = new AbortController();
+        const timeoutId = setTimeout(() => ctrl.abort(), 40000);
 
-        // Manual SSE fetch (supports custom Accept header)
-        fetchSSE(apiUrl);
+        fetch(url, {
+            headers: { "Accept": "text/event-stream" },
+            signal: ctrl.signal
+        }).then(async (res) => {
+            clearTimeout(timeoutId);
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({ error: "Failed to load stream" }));
+                spinner.style.display = "none";
+                showToast("❌ " + (errData.error || "Failed to load stream"), 5000);
+                return;
+            }
 
-        function fetchSSE(url) {
-            const ctrl = new AbortController();
-            const timeoutId = setTimeout(() => ctrl.abort(), 40000);
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
 
-            fetch(url, {
-                headers: { "Accept": "text/event-stream" },
-                signal: ctrl.signal
-            }).then(async (res) => {
-                clearTimeout(timeoutId);
-                if (!res.ok) {
-                    const errData = await res.json().catch(() => ({ error: "Failed to load stream" }));
-                    spinner.style.display = "none";
-                    showToast("❌ " + (errData.error || "Failed to load stream"), 5000);
-                    resolve();
-                    return;
-                }
+            const processChunk = async () => {
+                while (true) {
+                    let result;
+                    try {
+                        result = await reader.read();
+                    } catch (e) {
+                        break;
+                    }
+                    if (result.done) break;
 
-                const reader = res.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = "";
-                let metaReceived = false;
+                    buffer += decoder.decode(result.value, { stream: true });
+                    const lines = buffer.split("\n");
+                    buffer = lines.pop(); // keep incomplete trailing line
 
-                const processChunk = async () => {
-                    while (true) {
-                        let result;
-                        try {
-                            result = await reader.read();
-                        } catch (e) {
-                            break;
-                        }
-                        if (result.done) break;
+                    let currentEvent = "";
+                    let currentData = "";
 
-                        buffer += decoder.decode(result.value, { stream: true });
-
-                        // Parse SSE events from buffer
-                        const lines = buffer.split("\n");
-                        buffer = lines.pop(); // keep incomplete last line
-
-                        let currentEvent = "";
-                        let currentData = "";
-
-                        for (const line of lines) {
-                            if (line.startsWith("event: ")) {
-                                currentEvent = line.slice(7).trim();
-                            } else if (line.startsWith("data: ")) {
-                                currentData = line.slice(6).trim();
-                            } else if (line === "") {
-                                // Dispatch event
-                                if (currentEvent && currentData) {
-                                    try {
-                                        const payload = JSON.parse(currentData);
-                                        handleSSEEvent(currentEvent, payload);
-                                        if (currentEvent === "meta") metaReceived = true;
-                                    } catch (e) {}
-                                    currentEvent = "";
-                                    currentData = "";
-                                }
+                    for (const line of lines) {
+                        if (line.startsWith("event: ")) {
+                            currentEvent = line.slice(7).trim();
+                        } else if (line.startsWith("data: ")) {
+                            currentData = line.slice(6).trim();
+                        } else if (line === "") {
+                            if (currentEvent && currentData) {
+                                try {
+                                    const payload = JSON.parse(currentData);
+                                    handleSSEEvent(currentEvent, payload);
+                                } catch (e) {}
+                                currentEvent = "";
+                                currentData = "";
                             }
                         }
                     }
-                    resolve();
-                };
-
-                processChunk();
-            }).catch((err) => {
-                clearTimeout(timeoutId);
-                if (err.name !== "AbortError") {
-                    spinner.style.display = "none";
-                    showToast("❌ Failed to connect to stream", 5000);
                 }
-                resolve();
-            });
-        }
+            };
 
-        function handleSSEEvent(event, data) {
-            if (event === "meta") {
-                // ── Phase 1: Got TMDB info + sources ─────────────────────
-                currentMedia = data;
-                currentSources = data.sources || [];
+            processChunk();
+        }).catch((err) => {
+            clearTimeout(timeoutId);
+            if (err.name !== "AbortError") {
+                spinner.style.display = "none";
+                showToast("❌ Failed to connect to stream", 5000);
+            }
+        });
+    }
 
-                const tmdb = data.tmdb;
-                const titleEl = document.getElementById("mediaTitleText");
-                const badgeEl = document.getElementById("mediaBadge");
+    function handleSSEEvent(event, data) {
+        if (event === "meta") {
+            // ── Phase 1: TMDB info + candidate sources ───────────────────────
+            currentMedia = data;
+            currentSources = data.sources || [];
+            availableQualities = data.qualities || ["1080p"];
 
-                if (data.mediaType === "movie") {
-                    const yearStr = tmdb.year ? ` ${tmdb.year}` : "";
-                    if (titleEl) titleEl.innerText = `${tmdb.title}${yearStr}`;
-                    if (badgeEl) badgeEl.innerText = "MOVIE";
-                    document.title = `${tmdb.title} - Viewlix Player`;
-                } else {
-                    const epTag = `TV S${tmdb.season}E${tmdb.episode}`;
-                    if (titleEl) titleEl.innerText = `${tmdb.showName}`;
-                    if (badgeEl) badgeEl.innerText = epTag;
-                    document.title = `${tmdb.showName} ${epTag} - Viewlix Player`;
+            const tmdb = data.tmdb;
+            if (data.mediaType === "movie") {
+                const yearStr = tmdb.year ? ` (${tmdb.year})` : "";
+                if (mediaTitleText) mediaTitleText.innerText = `${tmdb.title}${yearStr}`;
+                if (mediaBadge) mediaBadge.innerText = "MOVIE";
+                if (mediaSubtitleText) mediaSubtitleText.style.display = "none";
+                if (btnEpisodesToggle) btnEpisodesToggle.style.display = "none";
+                if (btnNextEp) btnNextEp.style.display = "none";
+                document.title = `${tmdb.title} - Viewlix Player`;
+            } else {
+                // TV Series
+                if (mediaTitleText) mediaTitleText.innerText = `${tmdb.showName}`;
+                if (mediaBadge) mediaBadge.innerText = "TV SERIES";
+                if (mediaSubtitleText) {
+                    mediaSubtitleText.innerText = `S${tmdb.season} : E${tmdb.episode} • ${tmdb.episodeTitle || "Episode"}`;
+                    mediaSubtitleText.style.display = "block";
                 }
+                if (btnEpisodesToggle) btnEpisodesToggle.style.display = "inline-flex";
+                if (btnNextEp) btnNextEp.style.display = "inline-flex";
+                document.title = `${tmdb.showName} S${tmdb.season}E${tmdb.episode} - Viewlix Player`;
 
-                // Initialize duration estimate from TMDB
-                if (tmdb.runtime && tmdb.runtime > 0) {
-                    totalDuration = tmdb.runtime * 60;
-                } else if (data.mediaType === "tv") {
-                    totalDuration = 50 * 60;
-                } else {
-                    totalDuration = 115 * 60;
+                // Set up Netflix / HBO style Episodes Drawer
+                if (drawerShowTitle) drawerShowTitle.innerText = tmdb.showName;
+                if (tmdb.seasons) {
+                    renderSeasonSelector(tmdb.seasons, tmdb.season);
                 }
-                updateProgressUI();
-
-                // Populate quality + server UI
-                const initialQuality = data.currentQuality || (currentSources[0] ? currentSources[0].quality : "1080p");
-                updateQualityUI(initialQuality);
-                populateQualityOptions(data.qualities);
-
-                if (serverSelect) {
-                    serverSelect.innerHTML = "";
-                    currentSources.forEach((s, i) => {
-                        const opt = document.createElement("option");
-                        opt.value = i;
-                        opt.innerText = s.label || `Server ${i + 1} (${s.quality || "HD"})`;
-                        serverSelect.appendChild(opt);
-                    });
+                if (tmdb.episodes) {
+                    seasonEpisodesCache.set(tmdb.season, tmdb.episodes);
+                    renderEpisodeCards(tmdb.episodes, tmdb.season);
                 }
+            }
 
-                spinnerText.innerText = "Preparing video stream...";
+            // Duration baseline from TMDB or media type
+            if (tmdb.runtime && tmdb.runtime > 0) {
+                setTotalDuration(tmdb.runtime * 60);
+            } else if (data.mediaType === "tv") {
+                setTotalDuration(50 * 60);
+            } else {
+                setTotalDuration(115 * 60);
+            }
 
-                if (currentSources.length === 0) {
-                    spinner.style.display = "none";
-                    showToast("No stream sources found for this title.", 5000);
-                }
+            // Populate Quality and Server options
+            currentQuality = data.currentQuality || (currentSources[0] ? currentSources[0].quality : "1080p");
+            if (topQualityBadge) topQualityBadge.innerText = currentQuality;
+            populateQualityPills(availableQualities);
+            populateServerList(currentSources);
 
-            } else if (event === "stream") {
-                // ── Phase 2: Stream is ready — start playing immediately! ─
-                currentStreamData = data;
-                hasProbedDuration = false;
+            if (currentSources.length > 0) {
+                activeSource = currentSources[0];
+                if (activeServerLabel) activeServerLabel.innerText = activeSource.label || `Server 1 (${activeSource.quality || "HD"})`;
+            }
 
-                if (data.duration && data.duration > 0) {
-                    totalDuration = data.duration;
-                    hasProbedDuration = true;
-                    updateProgressUI();
-                } else {
-                    pollDuration(data.infoHash);
-                }
+            spinnerText.innerText = "Connecting to peer stream...";
+            spinnerSubtext.innerText = "Synchronizing video pieces";
 
-                // Detect if audio transcoding needed
-                if (data.needsTranscode) {
-                    isAudioTranscode = true;
-                    if (audioFixSwitch) audioFixSwitch.checked = true;
-                } else {
-                    isAudioTranscode = false;
-                    if (audioFixSwitch) audioFixSwitch.checked = false;
-                }
+            if (currentSources.length === 0) {
+                spinner.style.display = "none";
+                showToast("No stream sources found for this title.", 5000);
+            }
 
-                // Restore resume position if any
-                let initialTime = 0;
-                if (resumeStorageKey) {
-                    const savedSec = parseInt(localStorage.getItem(resumeStorageKey), 10);
-                    if (savedSec && savedSec > 10) {
-                        initialTime = savedSec;
-                        if (resumeText) resumeText.innerText = `Resumed at ${formatTime(savedSec)}`;
-                        if (resumePill) {
-                            resumePill.style.display = "flex";
-                            setTimeout(() => { resumePill.style.display = "none"; }, 7000);
-                        }
+        } else if (event === "stream") {
+            // ── Phase 2: Torrent is ready — start playback ───────────────────
+            currentStreamData = data;
+            hasProbedDuration = false;
+
+            if (data.duration && data.duration > 0) {
+                setTotalDuration(data.duration);
+                hasProbedDuration = true;
+            } else {
+                pollDuration(data.infoHash);
+            }
+
+            if (data.needsTranscode) {
+                isAudioTranscode = true;
+                if (audioFixSwitch) audioFixSwitch.checked = true;
+            } else {
+                isAudioTranscode = false;
+                if (audioFixSwitch) audioFixSwitch.checked = false;
+            }
+
+            // Check resume position
+            let initialTime = 0;
+            if (resumeStorageKey) {
+                const savedSec = parseInt(localStorage.getItem(resumeStorageKey), 10);
+                if (savedSec && savedSec > 10) {
+                    initialTime = savedSec;
+                    if (resumeText) resumeText.innerText = `Resumed at ${formatTime(savedSec)}`;
+                    if (resumePill) {
+                        resumePill.style.display = "flex";
+                        setTimeout(() => { resumePill.style.display = "none"; }, 7000);
                     }
                 }
-
-                // Also set activeSource from currentSources
-                if (!activeSource && currentSources.length > 0) {
-                    activeSource = currentSources.find((s) => s.infoHash === data.infoHash) || currentSources[0];
-                }
-
-                loadVideoStream(initialTime);
-
-            } else if (event === "stream_error") {
-                // Stream prep failed — but we still have sources user can manually try
-                spinner.style.display = "none";
-                showToast("⚠️ Auto-connect failed. Try selecting a different server.", 5000);
-
-            } else if (event === "error") {
-                spinner.style.display = "none";
-                showToast("❌ " + (data.error || "Failed to load stream"), 5000);
             }
+
+            if (!activeSource && currentSources.length > 0) {
+                activeSource = currentSources.find(s => s.infoHash === data.infoHash) || currentSources[0];
+                if (activeServerLabel) activeServerLabel.innerText = activeSource.label || "Server 1 (1080p)";
+            }
+
+            loadVideoStream(initialTime);
+
+        } else if (event === "stream_error") {
+            spinner.style.display = "none";
+            showToast("⚠️ Auto-connect failed. Try selecting another server in Settings.", 5000);
+        } else if (event === "error") {
+            spinner.style.display = "none";
+            showToast("❌ " + (data.error || "Failed to load stream"), 5000);
         }
-    });
+    }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   KEYBOARD SHORTCUTS
+   ───────────────────────────────────────────────────────────────────────────── */
+
+document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+
+    if (e.code === "Escape") {
+        closeEpisodesDrawer();
+        closeServerModal();
+        dismissNextPrompt();
+    } else if (e.code === "KeyE") {
+        if (currentMedia && currentMedia.mediaType === 'tv') {
+            toggleEpisodesDrawer();
+        }
+    } else if (e.code === "KeyN") {
+        if (currentMedia && currentMedia.mediaType === 'tv') {
+            playNextEpisode();
+        }
+    }
+});
 
 let playerInitialized = false;
 function safeInitPlayer() {
