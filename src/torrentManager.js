@@ -185,8 +185,8 @@ async function prepareTorrentOnServer(sourceOrHash, duration = 0) {
         throw new Error("Streaming engine is initializing");
     }
 
-    // Clean background streams to maximize bandwidth
-    cleanStaleTorrents(infoHash);
+    // NOTE: cleanStaleTorrents is NOT called here so parallel racing works correctly.
+    // It is called externally after a winner is determined (in prepareFastest or caller).
 
     const prepPromise = new Promise(async (resolve, reject) => {
         let responded = false;
@@ -316,22 +316,21 @@ async function prepareTorrentOnServer(sourceOrHash, duration = 0) {
 
 /**
  * Races ALL available sources in parallel and resolves with the first one
- * that successfully connects to peers. Losers are left running in background
- * (they'll be cleaned when a new stream is selected).
+ * that successfully connects to peers. After the winner is found, stale
+ * losing torrents are cleaned up to free bandwidth.
  */
 async function prepareFastest(sources, duration = 0) {
     if (!sources || sources.length === 0) {
         throw new Error("No stream sources available");
     }
 
-    // Start all sources simultaneously
+    // Start all sources simultaneously — do NOT clean stale torrents yet
     const races = sources.map((src) =>
         prepareTorrentOnServer(src, duration)
             .then((result) => ({ ok: true, result, src }))
             .catch((err) => ({ ok: false, err, src }))
     );
 
-    // Return first successful connection
     return new Promise((resolve, reject) => {
         let settled = 0;
         let won = false;
@@ -341,6 +340,9 @@ async function prepareFastest(sources, duration = 0) {
                 settled++;
                 if (!won && outcome.ok) {
                     won = true;
+                    // Clean ALL other losing torrents NOW that winner is known
+                    const winnerHash = (outcome.result.infoHash || "").toLowerCase();
+                    setImmediate(() => cleanStaleTorrents(winnerHash));
                     resolve(outcome.result);
                 } else if (!won && settled === races.length) {
                     reject(new Error("All stream sources timed out. Please try again."));

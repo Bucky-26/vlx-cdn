@@ -1,7 +1,7 @@
 const express = require("express");
 const { formatTime, formatBytes } = require("../utils");
 const { probeTorrentDuration } = require("../probe");
-const { getTorrentData, prepareTorrentOnServer } = require("../torrentManager");
+const { getTorrentData, prepareTorrentOnServer, getSource, cleanStaleTorrents } = require("../torrentManager");
 const { handleMovie, handleTv } = require("./media");
 
 const router = express.Router();
@@ -29,7 +29,11 @@ router.post("/source/select", async (req, res) => {
     }
 
     try {
-        const streamData = await prepareTorrentOnServer(targetId, duration);
+        // Use full cached source (has magnet URL) for reliable peer connection
+        const cachedSource = getSource(targetId);
+        const streamData = await prepareTorrentOnServer(cachedSource || targetId, duration);
+        // Free bandwidth from other torrents once this one is active
+        cleanStaleTorrents(targetId);
         return res.json({
             success: true,
             ...streamData

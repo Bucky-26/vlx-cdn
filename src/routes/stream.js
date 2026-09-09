@@ -2,7 +2,7 @@ const express = require("express");
 const cp = require("child_process");
 const { getFfmpegPath } = require("../ffmpegHelper");
 const { getMimeType } = require("../utils");
-const { getTorrentData, prioritizeTorrentWindow, prepareTorrentOnServer } = require("../torrentManager");
+const { getTorrentData, prioritizeTorrentWindow, prepareTorrentOnServer, getSource, cleanStaleTorrents } = require("../torrentManager");
 
 const router = express.Router();
 
@@ -12,11 +12,15 @@ router.get("/:infoHash", async (req, res) => {
 
     if (!torrentData) {
         try {
-            await prepareTorrentOnServer(infoHash);
+            // Use the full cached source object (has magnet URL) for reliable peer discovery
+            const cachedSource = getSource(infoHash);
+            await prepareTorrentOnServer(cachedSource || infoHash);
+            // Clean other stale torrents now that this one is active
+            cleanStaleTorrents(infoHash);
             torrentData = getTorrentData(infoHash);
         } catch (err) {
             console.error("Stream on-demand preparation error:", err.message);
-            return res.status(404).send("Stream not found: " + err.message);
+            return res.status(503).send("Stream not ready: " + err.message);
         }
     }
 
