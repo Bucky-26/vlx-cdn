@@ -10,7 +10,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+// Serve static player assets (CSS, JS) without serving index.html on root
+app.use(express.static(path.join(__dirname, "public"), { index: false }));
 
 // Mount TMDB media endpoints: /movie/:tmdbid and /tv/:tmdbid/:season/:episode
 app.use("/", mediaRouter);
@@ -18,6 +19,14 @@ app.use("/", mediaRouter);
 // Mount API and Stream routes
 app.use("/api", apiRoutes);
 app.use("/stream", streamRoutes);
+
+// Root endpoint: no torrent search page - strictly direct media streaming
+app.get("/", (req, res) => {
+    res.status(404).json({
+        error: "Not Found",
+        message: "Viewlix Media Server: Please access via /movie/:tmdbid or /tv/:tmdbid/:season/:episode"
+    });
+});
 
 async function start() {
     const ffmpegBin = getFfmpegPath();

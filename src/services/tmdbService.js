@@ -1,4 +1,5 @@
 const { buildMagnet, formatBytes } = require("../utils");
+const { cacheSource } = require("../torrentManager");
 
 const TMDB_API_KEY = process.env.APP_TMDB_API_KEY || "ad1819cb34ec21392f6ad54a9803a091";
 const TMDB_READ_TOKEN = process.env.APP_TMDB_API_READ_ACCESS_TOKEN || "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJhZDE4MTljYjM0ZWMyMTM5MmY2YWQ1NGE5ODAzYTA5MSIsIm5iZiI6MTc0NjgwNzAwNy4wOTIsInN1YiI6IjY4MWUyOGRmODBjZTA0MThlYTZlM2NiOSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.Cgmzm9rddrMOjd4QBLumcOfrjpO4H7sSu-hS05gYLRk";
@@ -335,6 +336,16 @@ function scoreTorrent(torrent, mediaType = "movie") {
     return Math.round(score);
 }
 
+function extractQuality(name) {
+    if (!name) return "1080p";
+    const n = name.toLowerCase();
+    if (n.includes("2160p") || n.includes("4k") || n.includes("uhd")) return "4K";
+    if (n.includes("1080p") || n.includes("1080i") || n.includes("fhd")) return "1080p";
+    if (n.includes("720p") || n.includes("hd")) return "720p";
+    if (n.includes("480p") || n.includes("sd") || n.includes("dvd")) return "480p";
+    return "1080p";
+}
+
 function getTop3ServersByPeers(results) {
     const clean = [];
     const cam = [];
@@ -353,6 +364,7 @@ function getTop3ServersByPeers(results) {
         item.seeders = parseInt(item.seeders, 10) || 0;
         item.leechers = parseInt(item.leechers, 10) || 0;
         item.totalPeers = item.seeders + item.leechers;
+        item.quality = extractQuality(item.name);
 
         if (isCam) {
             cam.push(item);
@@ -373,8 +385,24 @@ function getTop3ServersByPeers(results) {
     // Prefer clean releases with active peers; fallback to cam only if no clean streams
     const sorted = clean.length > 0 ? clean : cam;
 
-    // Return strictly the 3 best servers with the most peers
-    return sorted.slice(0, 3);
+    // Return top servers formatted cleanly without size or torrent branding
+    const topServers = sorted.slice(0, 5).map((item, idx) => {
+        // Cache source on server side so it can be streamed without client sending magnets
+        cacheSource(item.infoHash, item);
+
+        return {
+            id: item.infoHash,
+            infoHash: item.infoHash,
+            serverIndex: idx + 1,
+            name: item.name,
+            quality: item.quality,
+            label: `Server ${idx + 1} (${item.quality})`,
+            streamUrl: `/stream/${item.infoHash}`,
+            transcodeUrl: `/stream/${item.infoHash}?transcode=audio`
+        };
+    });
+
+    return topServers;
 }
 
 async function searchMovieTorrents(movie) {

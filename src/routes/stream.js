@@ -2,16 +2,26 @@ const express = require("express");
 const cp = require("child_process");
 const { getFfmpegPath } = require("../ffmpegHelper");
 const { getMimeType } = require("../utils");
-const { getTorrentData, prioritizeTorrentWindow } = require("../torrentManager");
+const { getTorrentData, prioritizeTorrentWindow, prepareTorrentOnServer } = require("../torrentManager");
 
 const router = express.Router();
 
-router.get("/:infoHash", (req, res) => {
+router.get("/:infoHash", async (req, res) => {
     const infoHash = (req.params.infoHash || "").toLowerCase();
-    const torrentData = getTorrentData(infoHash);
+    let torrentData = getTorrentData(infoHash);
 
     if (!torrentData) {
-        return res.status(404).send("Torrent not found");
+        try {
+            await prepareTorrentOnServer(infoHash);
+            torrentData = getTorrentData(infoHash);
+        } catch (err) {
+            console.error("Stream on-demand preparation error:", err.message);
+            return res.status(404).send("Stream not found: " + err.message);
+        }
+    }
+
+    if (!torrentData) {
+        return res.status(404).send("Stream not found");
     }
 
     const { file, torrent } = torrentData;
