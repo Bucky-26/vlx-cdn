@@ -45,6 +45,10 @@ process.on("uncaughtException", (err) => {
 });
 
 process.on("unhandledRejection", (reason) => {
+    const msg = (reason && reason.message) || String(reason);
+    // Timeout rejections from losing race sources are expected — suppress them
+    if (msg.includes("Timeout connecting to media stream peers")) return;
+    if (msg.includes("All stream sources timed out")) return;
     console.error("Server caught unhandledRejection:", reason);
 });
 

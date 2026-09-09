@@ -50,6 +50,7 @@ async function getMovieInfo(tmdbId) {
         mediaType: "movie",
         title: data.title,
         originalTitle: data.original_title,
+        originalLanguage: (data.original_language || "en").toLowerCase(),
         year: data.release_date ? data.release_date.split("-")[0] : "",
         releaseDate: data.release_date || null,
         imdbId: data.imdb_id || null,
@@ -81,6 +82,7 @@ async function getTvEpisodeInfo(tmdbId, season, episode) {
         id: tvData.id,
         mediaType: "tv",
         showName: tvData.name,
+        originalLanguage: (tvData.original_language || "en").toLowerCase(),
         season: parseInt(season, 10),
         episode: parseInt(episode, 10),
         episodeTitle: epData.name || `Episode ${episode}`,
@@ -136,6 +138,7 @@ async function searchApibay(query) {
                 size,
                 sizeFormatted: formatBytes(size),
                 provider: "ThePirateBay",
+                streamTitle: item.name,
                 magnet,
                 streamUrl: `/stream/${hash}`,
                 transcodeUrl: `/stream/${hash}?transcode=audio`
@@ -189,6 +192,7 @@ async function searchTorrentio(type, id) {
                 size: sizeBytes,
                 sizeFormatted: formatBytes(sizeBytes),
                 provider,
+                streamTitle: s.title || "",
                 magnet,
                 streamUrl: `/stream/${hash}`,
                 transcodeUrl: `/stream/${hash}?transcode=audio`
@@ -230,6 +234,7 @@ async function searchYts(query) {
                     size,
                     sizeFormatted: formatBytes(size),
                     provider: "YTS",
+                    streamTitle: filename,
                     magnet,
                     streamUrl: `/stream/${hash}`,
                     transcodeUrl: `/stream/${hash}?transcode=audio`
@@ -319,21 +324,101 @@ function scoreTorrent(torrent, mediaType = "movie") {
         }
     }
 
-    // Trusted web-streaming groups bonus
+    // Trusted web-streaming groups bonus (English original audio)
     if (
         name.includes("yify") ||
         name.includes("yts") ||
         name.includes("rarbg") ||
         name.includes("psa") ||
         name.includes("galaxyrg") ||
+        name.includes("galaxytv") ||
         name.includes("megusta") ||
         name.includes("eztv") ||
-        name.includes("qxr")
+        name.includes("qxr") ||
+        name.includes("sparks") ||
+        name.includes("flux") ||
+        name.includes("kogi") ||
+        name.includes("ntb")
     ) {
-        score += 15;
+        score += 20;
+    }
+
+    // Heavy penalty for non-English audio on English titles
+    if (hasNonEnglishAudio(torrent.name, torrent.streamTitle, true)) {
+        score -= 1000;
     }
 
     return Math.round(score);
+}
+
+function hasNonEnglishAudio(name, streamTitle = "", isEnglishMedia = true) {
+    if (!isEnglishMedia) return false;
+    const n = (name || "").toLowerCase();
+    const st = (streamTitle || "").toLowerCase();
+    const text = `${n} ${st}`;
+
+    // 1. Cyrillic characters (Russian, Ukrainian, etc.)
+    if (/[\u0400-\u04FF]/.test(text)) return true;
+
+    // 2. Foreign release / dubbing groups and sites
+    const foreignGroups = [
+        "lostfilm", "newstudio", "hdrezka", "rezka", "kuraj-bambey", "kuraj",
+        "baibako", "coldfilm", "exkinoray", "alexfilm", "jaskier", "red head sound",
+        "rhs", "viruseproject", "gears media", "hamsterstudio", "sokolov",
+        "kinozal", "rutracker", "rutor", "ilcorsaronero", "sp33dy94", "mircrew",
+        "lullozzo", "alusia", "tntvillage", "mirc"
+    ];
+    for (const g of foreignGroups) {
+        if (text.includes(g)) return true;
+    }
+
+    // 3. Dub indicators in release name
+    if (/\b(dublado|dubbing|lektor(\s*pl)?|synchro)\b/i.test(text)) {
+        return true;
+    }
+    if (/\b(dub|dubbed)\b/i.test(text) && !/\b(eng|english)\s*(dub|dubbed)\b/i.test(text)) {
+        return true;
+    }
+
+    // 4. Foreign audio listed first in dual audio: ITA.ENG, RUS.ENG, HINDI.ENG, etc.
+    if (/\b(ita|rus|hindi|fre|french|ger|german|spa|spanish|latino)[._\s\-\/]+(eng|english)\b/i.test(text)) {
+        return true;
+    }
+
+    // 5. Torrentio emoji flags: has foreign audio flag without English
+    const foreignFlags = ["🇮🇹", "🇷🇺", "🇺🇦", "🇫🇷", "🇪🇸", "🇩🇪", "🇵🇹", "🇧🇷", "🇮🇳", "🇨🇿", "🇵🇱", "🇹🇷"];
+    const hasForeignFlag = foreignFlags.some((f) => text.includes(f));
+    const hasEngFlag = text.includes("🇬🇧") || text.includes("🇺🇸");
+    if (hasForeignFlag && !hasEngFlag) return true;
+
+    // 6. Standalone foreign language tokens
+    const foreignTokens = [
+        "french", "truefrench", "vff", "vfq", "vf2", "subfrench",
+        "german", "deutsch",
+        "italian", "ita",
+        "castellano", "latino", "espanol", "español",
+        "russian", "rus",
+        "hindi", "tamil", "telugu",
+        "polish", "polski"
+    ];
+
+    for (const tok of foreignTokens) {
+        const re = new RegExp(`(^|[._\\-\\s\\[\\(])${tok}([._\\-\\s\\]\\)]|$)`, "i");
+        if (re.test(n)) {
+            // Check if it specifically denotes subtitles rather than audio dub
+            const subRe = new RegExp(`${tok}[._\\-\\s]*(sub|subs|subtitles)`, "i");
+            const subReBefore = new RegExp(`(sub|subs|subtitles)[._\\-\\s]*${tok}`, "i");
+            if (subRe.test(n) || subReBefore.test(n)) {
+                continue;
+            }
+            const hasEngExplicit = /\b(eng|english)\b/i.test(n) || text.includes("🇬🇧") || text.includes("🇺🇸");
+            if (!hasEngExplicit) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 function extractQuality(name) {
@@ -346,11 +431,16 @@ function extractQuality(name) {
     return "1080p";
 }
 
-function getTop3ServersByPeers(results) {
+function getTop3ServersByPeers(results, isEnglishMedia = true) {
     const clean = [];
     const cam = [];
 
     for (const item of results) {
+        // Exclude foreign audio dubs for English media
+        if (isEnglishMedia && hasNonEnglishAudio(item.name, item.streamTitle, true)) {
+            continue;
+        }
+
         const name = (item.name || "").toLowerCase();
         const isCam =
             name.includes("cam") ||
@@ -406,7 +496,8 @@ function getTop3ServersByPeers(results) {
 }
 
 async function searchMovieTorrents(movie) {
-    const cacheKey = `search_movie_${movie.id || movie.title}`;
+    const isEnglishMedia = !movie.originalLanguage || movie.originalLanguage === "en";
+    const cacheKey = `search_movie_en_${movie.id || movie.title}`;
     const cached = getCached(cacheKey);
     if (cached) return cached;
 
@@ -440,24 +531,14 @@ async function searchMovieTorrents(movie) {
         }
     }
 
-    // Fallback if needed
-    if (results.length < 5 && movie.title) {
-        const moreItems = await searchApibay(movie.title);
-        for (const item of moreItems) {
-            if (item.infoHash && !seen.has(item.infoHash)) {
-                seen.add(item.infoHash);
-                results.push(item);
-            }
-        }
-    }
-
-    const top3 = getTop3ServersByPeers(results);
-    setCached(cacheKey, top3, 900000); // 15 min cache
-    return top3;
+    const top5 = getTop3ServersByPeers(results, isEnglishMedia);
+    setCached(cacheKey, top5, 900000);
+    return top5;
 }
 
 async function searchTvTorrents(tv) {
-    const cacheKey = `search_tv_${tv.id}_${tv.season}_${tv.episode}`;
+    const isEnglishMedia = !tv.originalLanguage || tv.originalLanguage === "en";
+    const cacheKey = `search_tv_en_${tv.id}_${tv.season}_${tv.episode}`;
     const cached = getCached(cacheKey);
     if (cached) return cached;
 
@@ -491,7 +572,7 @@ async function searchTvTorrents(tv) {
         }
     }
 
-    const top3 = getTop3ServersByPeers(results);
+    const top3 = getTop3ServersByPeers(results, isEnglishMedia);
     setCached(cacheKey, top3, 900000); // 15 min cache
     return top3;
 }

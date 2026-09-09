@@ -138,34 +138,23 @@ async function prepareTorrentOnServer(sourceOrHash, duration = 0) {
     if (typeof sourceOrHash === "string") {
         infoHash = sourceOrHash.toLowerCase();
         source = getSource(infoHash);
-        if (source && source.magnet) {
-            magnet = source.magnet;
-        }
+        if (source && source.magnet) magnet = source.magnet;
     } else if (sourceOrHash && typeof sourceOrHash === "object") {
         source = sourceOrHash;
         infoHash = (source.infoHash || source.id || "").toLowerCase();
-        magnet = source.magnet || "";
-        cacheSource(infoHash, source);
+        magnet = source.magnet || (getSource(infoHash) && getSource(infoHash).magnet) || "";
     }
 
-    if (!infoHash) {
-        throw new Error("Invalid stream source");
-    }
+    if (!infoHash) throw new Error("Invalid stream source");
+    if (!magnet) magnet = buildMagnet(infoHash, source && source.name ? source.name : "video");
+    if (source) cacheSource(infoHash, { ...source, magnet });
 
-    // Automatically construct standard magnet if not explicitly cached
-    if (!magnet) {
-        magnet = buildMagnet(infoHash, source && source.name ? source.name : "video");
-    }
-
-    // Already active in torrents map
+    // Already active
     if (hasTorrent(infoHash)) {
         const data = getTorrentData(infoHash);
-        if (duration && (!data.duration || data.duration <= 0)) {
-            data.duration = Number(duration);
-        }
+        if (duration && (!data.duration || data.duration <= 0)) data.duration = Number(duration);
         return {
-            id: infoHash,
-            infoHash,
+            id: infoHash, infoHash,
             filename: data.file.name,
             streamUrl: `/stream/${infoHash}`,
             transcodeUrl: `/stream/${infoHash}?transcode=audio`,
@@ -181,28 +170,33 @@ async function prepareTorrentOnServer(sourceOrHash, duration = 0) {
     }
 
     const c = await initClient();
-    if (!c) {
-        throw new Error("Streaming engine is initializing");
-    }
+    if (!c) throw new Error("Streaming engine is initializing");
 
     // NOTE: cleanStaleTorrents is NOT called here so parallel racing works correctly.
     // It is called externally after a winner is determined (in prepareFastest or caller).
 
-    const prepPromise = new Promise(async (resolve, reject) => {
+    // Build a pure Promise (no async executor) to avoid the new Promise(async...) anti-pattern
+    // which causes Node.js to fire unhandledRejection for the inner async function's promise.
+    const prepPromise = new Promise((resolve, reject) => {
         let responded = false;
+        let timeoutTimer = null;
 
-        // 15s per-source timeout — when racing multiple sources this is plenty
-        const timeoutTimer = setTimeout(() => {
-            if (!responded) {
-                responded = true;
-                reject(new Error("Timeout connecting to media stream peers. Please try another server or quality."));
-            }
-        }, 15000);
-
-        function onReady(torrent) {
+        function done(err, result) {
             if (responded) return;
             responded = true;
             clearTimeout(timeoutTimer);
+            if (err) reject(err);
+            else resolve(result);
+        }
+
+        timeoutTimer = setTimeout(() => {
+            done(new Error("Timeout connecting to media stream peers. Please try another server or quality."));
+        }, 12000);
+
+        let readyRan = false;
+        function onReady(torrent) {
+            if (readyRan) return;
+            readyRan = true;
 
             const videoFiles = torrent.files.filter((f) => {
                 const ext = path.extname(f.name).toLowerCase();
@@ -210,38 +204,28 @@ async function prepareTorrentOnServer(sourceOrHash, duration = 0) {
             });
 
             if (videoFiles.length === 0) {
-                return reject(new Error("No playable video tracks found in this stream source."));
+                return done(new Error("No playable video tracks found in this stream source."));
             }
 
-            // Pick largest video file (most likely main feature)
             const file = videoFiles.sort((a, b) => b.length - a.length)[0];
 
-            // Deselect ALL files first, then select only the target file
-            try {
-                torrent.files.forEach((f) => f.deselect());
-            } catch (e) {}
+            try { torrent.files.forEach((f) => f.deselect()); } catch (e) {}
             try { file.select(); } catch (e) {}
 
             const torrentData = {
-                torrent,
-                file,
+                torrent, file,
                 duration: Number(duration) || 0,
                 currentPiece: file._startPiece || 0,
                 lastBufferedPiece: file._startPiece || 0
             };
             setTorrentData(infoHash, torrentData);
-
-            // Aggressively rush first 25 pieces + 120-piece forward buffer
             prioritizeTorrentWindow(torrentData, file._startPiece || 0, 25, 120);
-
-            // Probe duration in background (non-blocking)
             probeTorrentDuration(torrentData).catch(() => {});
 
             console.log(`Server prepared stream for ${file.name} (${infoHash})`);
 
-            resolve({
-                id: infoHash,
-                infoHash,
+            done(null, {
+                id: infoHash, infoHash,
                 filename: file.name,
                 streamUrl: `/stream/${infoHash}`,
                 transcodeUrl: `/stream/${infoHash}?transcode=audio`,
@@ -251,30 +235,27 @@ async function prepareTorrentOnServer(sourceOrHash, duration = 0) {
             });
         }
 
-        try {
-            const existing = await c.get(infoHash);
-            if (existing) {
-                if (existing.ready || (existing.files && existing.files.length > 0)) {
-                    return onReady(existing);
-                }
+        // Check if torrent is already in client (synchronous lookup in c.torrents array)
+        const existing = c.torrents
+            ? c.torrents.find((t) => t.infoHash && t.infoHash.toLowerCase() === infoHash)
+            : null;
+
+        if (existing) {
+            if (existing.ready || (existing.files && existing.files.length > 0)) {
+                onReady(existing);
+            } else {
                 existing.once("ready", () => onReady(existing));
-                existing.once("error", (err) => {
-                    if (!responded) {
-                        responded = true;
-                        clearTimeout(timeoutTimer);
-                        reject(err);
-                    }
-                });
-                return;
+                existing.once("error", (err) => done(err));
             }
-        } catch (e) {}
+            return;
+        }
 
         const torrentOpts = {
             destroyStoreOnDestroy: true,
-            deselect: true,           // Don't download anything until we tell it to
+            deselect: true,
             strategy: "sequential",
-            maxConns: 200,             // More peers = faster metadata + first pieces
-            storeCacheSlots: 200,      // Larger RAM cache = smoother buffering
+            maxConns: 200,
+            storeCacheSlots: 200,
             announce: TRACKERS
         };
 
@@ -284,70 +265,64 @@ async function prepareTorrentOnServer(sourceOrHash, duration = 0) {
                 onReady(t);
             });
             try { torrent.setMaxListeners(0); } catch (e) {}
-
-            torrent.on("error", (err) => {
-                if (!responded) {
-                    responded = true;
-                    clearTimeout(timeoutTimer);
-                    reject(err);
-                }
-            });
-
+            torrent.on("error", (err) => done(err));
             torrent.on("ready", () => onReady(torrent));
         } catch (err) {
-            if (!responded) {
-                responded = true;
-                clearTimeout(timeoutTimer);
-                reject(err);
-            }
+            done(err);
         }
     });
 
     pendingPreparations.set(infoHash, prepPromise);
-    // Attach a no-op catch so Node.js doesn't throw unhandledRejection on the
-    // stored reference — callers still get rejection via `return prepPromise`
-    prepPromise.catch(() => {});
-    prepPromise.finally(() => {
-        pendingPreparations.delete(infoHash);
-    });
+    prepPromise
+        .finally(() => { pendingPreparations.delete(infoHash); })
+        .catch(() => {}); // suppress rejection from .finally()'s returned promise
 
     return prepPromise;
 }
 
 /**
- * Races ALL available sources in parallel and resolves with the first one
- * that successfully connects to peers. After the winner is found, stale
- * losing torrents are cleaned up to free bandwidth.
+ * Fast parallel stream discovery:
+ * Races top 5 sources for metadata simultaneously with deselect: true (zero video bandwidth).
+ * Resolves immediately with the fastest connecting source (typically 2-4s).
+ * Immediately removes losers to dedicate 100% bandwidth to the winner.
  */
 async function prepareFastest(sources, duration = 0) {
     if (!sources || sources.length === 0) {
         throw new Error("No stream sources available");
     }
 
-    // Start all sources simultaneously — do NOT clean stale torrents yet
-    const races = sources.map((src) =>
-        prepareTorrentOnServer(src, duration)
-            .then((result) => ({ ok: true, result, src }))
-            .catch((err) => ({ ok: false, err, src }))
-    );
+    const candidates = sources.slice(0, 5);
 
     return new Promise((resolve, reject) => {
-        let settled = 0;
         let won = false;
+        let settled = 0;
+        const total = candidates.length;
 
-        races.forEach((p) => {
-            p.then((outcome) => {
-                settled++;
-                if (!won && outcome.ok) {
+        const timeoutTimer = setTimeout(() => {
+            if (!won) {
+                won = true;
+                reject(new Error("All stream sources timed out. Please try another server or quality."));
+            }
+        }, 13000);
+
+        candidates.forEach((src) => {
+            prepareTorrentOnServer(src, duration)
+                .then((result) => {
+                    if (won) return;
                     won = true;
-                    // Clean ALL other losing torrents NOW that winner is known
-                    const winnerHash = (outcome.result.infoHash || "").toLowerCase();
-                    setImmediate(() => cleanStaleTorrents(winnerHash));
-                    resolve(outcome.result);
-                } else if (!won && settled === races.length) {
-                    reject(new Error("All stream sources timed out. Please try again."));
-                }
-            });
+                    clearTimeout(timeoutTimer);
+                    const winnerHash = (result.infoHash || "").toLowerCase();
+                    // Destroy losing candidates immediately to allocate full bandwidth to winner
+                    setTimeout(() => cleanStaleTorrents(winnerHash), 50);
+                    resolve(result);
+                })
+                .catch((err) => {
+                    settled++;
+                    if (!won && settled >= total) {
+                        clearTimeout(timeoutTimer);
+                        reject(new Error("All stream sources timed out. Please try another server or quality."));
+                    }
+                });
         });
     });
 }
