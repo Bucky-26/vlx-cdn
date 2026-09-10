@@ -147,6 +147,7 @@ async function handleStreamPlayback(req, res, infoHash, targetFileIdx = null, ti
             "-preset", "ultrafast",
             "-tune", "zerolatency",
             "-flush_packets", "1",
+            "-avoid_negative_ts", "make_zero",
             "-frag_duration", "200000",
             "-max_muxing_queue_size", "4096",
             "-f", "mp4",
@@ -252,6 +253,17 @@ async function handleStreamPlayback(req, res, infoHash, targetFileIdx = null, ti
         totalPieces - 1,
         Math.floor((fileOffset + start) / pieceLength)
     ));
+    // Prune previous file streams if this is a distant seek jump
+    torrentData.activeFileStreams = torrentData.activeFileStreams || new Set();
+    for (const oldStream of torrentData.activeFileStreams) {
+        try {
+            if (typeof oldStream._startByte === "number" && Math.abs(start - oldStream._startByte) > 10 * 1024 * 1024) {
+                oldStream.destroy();
+                torrentData.activeFileStreams.delete(oldStream);
+            }
+        } catch (e) {}
+    }
+
     prioritizeTorrentWindow(torrentData, targetPiece, 15, 60);
 
     const chunkSize = end - start + 1;
@@ -264,6 +276,8 @@ async function handleStreamPlayback(req, res, infoHash, targetFileIdx = null, ti
     });
 
     const stream = file.createReadStream({ start, end, highWaterMark: 2 * 1024 * 1024 });
+    stream._startByte = start;
+    torrentData.activeFileStreams.add(stream);
 
     stream.on("error", (err) => {
         if (err.code !== "PREMATURE_CLOSE" && err.code !== "ERR_STREAM_PREMATURE_CLOSE") {
@@ -272,6 +286,9 @@ async function handleStreamPlayback(req, res, infoHash, targetFileIdx = null, ti
     });
 
     res.on("close", () => {
+        if (torrentData.activeFileStreams) {
+            torrentData.activeFileStreams.delete(stream);
+        }
         stream.destroy();
     });
 

@@ -13,6 +13,9 @@ export default function VideoPlayer({ mediaId, mediaType = 'movie', season = 1, 
   const syncTimerRef = useRef(null);
   const controlsTimeoutRef = useRef(null);
   const currentInfoHashRef = useRef(null);
+  const streamStartTimeRef = useRef(0);
+  const [streamStartTime, setStreamStartTime] = useState(0);
+  const seekDebounceRef = useRef(null);
 
   // Auto Audio Transcode (ON by default, persistent)
   const [autoTranscode, setAutoTranscode] = useState(() => {
@@ -88,15 +91,18 @@ export default function VideoPlayer({ mediaId, mediaType = 'movie', season = 1, 
     return `${mins}:${String(secs).padStart(2, '0')}`;
   };
 
-  // Compute final stream URL based on Auto Audio Transcode preference
-  const computeFinalStreamUrl = useCallback((streamData, transcodePref) => {
+  // Compute final stream URL based on Auto Audio Transcode preference and optional seek time
+  const computeFinalStreamUrl = useCallback((streamData, transcodePref, startTimeSec = 0) => {
     if (!streamData) return null;
     const baseSrc = streamData.streamUrl || `/stream/${streamData.infoHash}`;
     const needsConversion = Boolean(streamData.needsTranscode);
     
     // If autoTranscode is ON and stream has incompatible audio/video, transcode to AAC/H.264
     if (transcodePref && needsConversion) {
-      return `${baseSrc}?transcode=audio`;
+      const sep = baseSrc.includes('?') ? '&' : '?';
+      return startTimeSec > 0
+        ? `${baseSrc}${sep}transcode=audio&t=${Math.floor(startTimeSec)}`
+        : `${baseSrc}${sep}transcode=audio`;
     }
     return baseSrc;
   }, []);
@@ -117,6 +123,9 @@ export default function VideoPlayer({ mediaId, mediaType = 'movie', season = 1, 
       if (data.infoHash) {
         currentInfoHashRef.current = data.infoHash;
       }
+
+      streamStartTimeRef.current = 0;
+      setStreamStartTime(0);
 
       const finalSrc = computeFinalStreamUrl(data, autoTranscode);
       setStreamUrl(finalSrc);
@@ -255,11 +264,84 @@ export default function VideoPlayer({ mediaId, mediaType = 'movie', season = 1, 
     };
   }, [notifyStreamStop]);
 
+  // Execute seek: Native Range seek for direct MP4, or fast timestamp &t= jump for Transcode
+  const executeSeek = useCallback((targetSec) => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const effDur = totalDurationRef.current > 0 ? totalDurationRef.current : (duration || 0);
+    const clamped = Math.max(0, Math.min(effDur > 0 ? effDur - 0.5 : 100000, targetSec));
+    
+    const isTranscoding = Boolean(autoTranscode && rawStreamData?.needsTranscode) || Boolean(streamUrl && streamUrl.includes('transcode=audio'));
+
+    if (!isTranscoding) {
+      // Direct HTTP 206 range stream: browser handles partial requests natively
+      video.currentTime = clamped;
+      setCurrentTime(clamped);
+      return;
+    }
+
+    // Transcode mode: Check if clamped target is already inside video's buffered ranges
+    const localVideoTime = clamped - streamStartTimeRef.current;
+    let isBufferedLocally = false;
+    if (video.buffered && video.buffered.length > 0 && localVideoTime >= 0) {
+      for (let i = 0; i < video.buffered.length; i++) {
+        if (localVideoTime >= video.buffered.start(i) && localVideoTime <= video.buffered.end(i) - 0.5) {
+          isBufferedLocally = true;
+          break;
+        }
+      }
+    }
+
+    if (isBufferedLocally) {
+      video.currentTime = localVideoTime;
+      setCurrentTime(clamped);
+      return;
+    }
+
+    // Target is outside current buffer: seek immediately on the server with &t=
+    setCurrentTime(clamped);
+    setIsBuffering(true);
+
+    if (seekDebounceRef.current) {
+      clearTimeout(seekDebounceRef.current);
+    }
+
+    seekDebounceRef.current = setTimeout(() => {
+      if (!videoRef.current || !rawStreamData) return;
+      const targetInt = Math.floor(clamped);
+      streamStartTimeRef.current = targetInt;
+      setStreamStartTime(targetInt);
+
+      const newUrl = computeFinalStreamUrl(rawStreamData, true, targetInt);
+      setStreamUrl(newUrl);
+
+      const vid = videoRef.current;
+      vid.src = newUrl;
+      vid.load();
+      const p = vid.play();
+      if (p && typeof p.then === 'function') {
+        p.then(() => {
+          setIsBuffering(false);
+          setIsPlaying(true);
+        }).catch(() => {
+          setIsBuffering(false);
+        });
+      }
+    }, 250);
+  }, [autoTranscode, rawStreamData, streamUrl, duration, computeFinalStreamUrl]);
+
   // Video Event Handlers
   const handleTimeUpdate = () => {
     const video = videoRef.current;
     if (!video) return;
-    setCurrentTime(video.currentTime);
+
+    const isTranscoding = Boolean(autoTranscode && rawStreamData?.needsTranscode) || Boolean(streamUrl && streamUrl.includes('transcode=audio'));
+    const effectiveTime = isTranscoding 
+      ? (streamStartTimeRef.current + (video.currentTime || 0))
+      : (video.currentTime || 0);
+
+    setCurrentTime(effectiveTime);
 
     const effectiveDur = totalDurationRef.current > 0 ? totalDurationRef.current : (video.duration || 0);
     if (effectiveDur > 0 && effectiveDur !== duration) {
@@ -268,7 +350,9 @@ export default function VideoPlayer({ mediaId, mediaType = 'movie', season = 1, 
 
     if (video.buffered && video.buffered.length > 0 && effectiveDur > 0) {
       try {
-        const lastBuffered = video.buffered.end(video.buffered.length - 1);
+        const lastBuffered = isTranscoding
+          ? (streamStartTimeRef.current + video.buffered.end(video.buffered.length - 1))
+          : video.buffered.end(video.buffered.length - 1);
         setBufferedPct(Math.min(100, (lastBuffered / effectiveDur) * 100));
       } catch (e) {}
     }
@@ -286,29 +370,26 @@ export default function VideoPlayer({ mediaId, mediaType = 'movie', season = 1, 
   };
 
   const handleSeekDelta = (deltaSec) => {
-    const video = videoRef.current;
-    if (!video) return;
-    const effDur = totalDurationRef.current > 0 ? totalDurationRef.current : (video.duration || 0);
-    const newPos = Math.max(0, Math.min(effDur || 100000, video.currentTime + deltaSec));
-    video.currentTime = newPos;
-    setCurrentTime(newPos);
+    const isTranscoding = Boolean(autoTranscode && rawStreamData?.needsTranscode) || Boolean(streamUrl && streamUrl.includes('transcode=audio'));
+    const cur = isTranscoding 
+      ? (streamStartTimeRef.current + (videoRef.current?.currentTime || 0))
+      : (videoRef.current?.currentTime || 0);
+    executeSeek(cur + deltaSec);
     showToast(deltaSec > 0 ? `+${deltaSec}s` : `${deltaSec}s`);
   };
 
   // Scrubber Progress Click / Drag
   const handleScrubberClick = (e) => {
     const container = progressContainerRef.current;
-    const video = videoRef.current;
-    if (!container || !video) return;
+    if (!container) return;
 
     const rect = container.getBoundingClientRect();
     const clickX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
     const pct = clickX / rect.width;
-    const effDur = totalDurationRef.current > 0 ? totalDurationRef.current : (video.duration || 0);
+    const effDur = totalDurationRef.current > 0 ? totalDurationRef.current : (duration || 0);
     if (effDur > 0) {
       const targetSec = pct * effDur;
-      video.currentTime = targetSec;
-      setCurrentTime(targetSec);
+      executeSeek(targetSec);
     }
   };
 
@@ -382,13 +463,24 @@ export default function VideoPlayer({ mediaId, mediaType = 'movie', season = 1, 
     localStorage.setItem('viewlix_auto_transcode', String(nextPref));
 
     if (rawStreamData && videoRef.current) {
-      const currentPos = videoRef.current.currentTime || 0;
-      const wasPlaying = !videoRef.current.paused;
-      const newUrl = computeFinalStreamUrl(rawStreamData, nextPref);
+      const isTranscoding = Boolean(autoTranscode && rawStreamData?.needsTranscode) || Boolean(streamUrl && streamUrl.includes('transcode=audio'));
+      const currentPos = isTranscoding 
+        ? (streamStartTimeRef.current + (videoRef.current.currentTime || 0)) 
+        : (videoRef.current.currentTime || 0);
 
+      const wasPlaying = !videoRef.current.paused;
+      const willTranscode = nextPref && rawStreamData.needsTranscode;
+      const targetStart = willTranscode ? Math.floor(currentPos) : 0;
+      streamStartTimeRef.current = targetStart;
+      setStreamStartTime(targetStart);
+
+      const newUrl = computeFinalStreamUrl(rawStreamData, nextPref, targetStart);
       setStreamUrl(newUrl);
+
       videoRef.current.src = newUrl;
-      videoRef.current.currentTime = currentPos;
+      if (!willTranscode) {
+        videoRef.current.currentTime = currentPos;
+      }
       if (wasPlaying) {
         videoRef.current.play().catch(() => {});
       }
@@ -411,13 +503,25 @@ export default function VideoPlayer({ mediaId, mediaType = 'movie', season = 1, 
     setShowServerModal(false);
 
     if (!videoRef.current) return;
-    const currentPos = videoRef.current.currentTime || 0;
+    const isTranscoding = Boolean(autoTranscode && rawStreamData?.needsTranscode) || Boolean(streamUrl && streamUrl.includes('transcode=audio'));
+    const currentPos = isTranscoding 
+      ? (streamStartTimeRef.current + (videoRef.current.currentTime || 0)) 
+      : (videoRef.current.currentTime || 0);
+
     const baseSrc = `/stream/${src.infoHash}`;
-    const newSrc = autoTranscode ? `${baseSrc}?transcode=audio` : baseSrc;
+    const targetStart = autoTranscode ? Math.floor(currentPos) : 0;
+    streamStartTimeRef.current = targetStart;
+    setStreamStartTime(targetStart);
+
+    const newSrc = autoTranscode 
+      ? `${baseSrc}?transcode=audio${targetStart > 0 ? `&t=${targetStart}` : ''}`
+      : baseSrc;
 
     setStreamUrl(newSrc);
     videoRef.current.src = newSrc;
-    videoRef.current.currentTime = currentPos;
+    if (!autoTranscode) {
+      videoRef.current.currentTime = currentPos;
+    }
     videoRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
     showToast(`Switched to ${src.label || 'Server'}`);
   };
@@ -440,9 +544,8 @@ export default function VideoPlayer({ mediaId, mediaType = 'movie', season = 1, 
   };
 
   const handleResume = () => {
-    if (resumePrompt && videoRef.current) {
-      videoRef.current.currentTime = resumePrompt.seconds;
-      setCurrentTime(resumePrompt.seconds);
+    if (resumePrompt) {
+      executeSeek(resumePrompt.seconds);
       setResumePrompt(null);
       showToast(`Resumed playback at ${resumePrompt.formatted}`);
     }
@@ -452,7 +555,10 @@ export default function VideoPlayer({ mediaId, mediaType = 'movie', season = 1, 
   useEffect(() => {
     syncTimerRef.current = setInterval(() => {
       if (!videoRef.current || videoRef.current.paused || !meta) return;
-      const cur = videoRef.current.currentTime;
+      const isTranscoding = Boolean(autoTranscode && rawStreamData?.needsTranscode) || Boolean(streamUrl && streamUrl.includes('transcode=audio'));
+      const cur = isTranscoding 
+        ? (streamStartTimeRef.current + (videoRef.current.currentTime || 0)) 
+        : (videoRef.current.currentTime || 0);
       const dur = totalDurationRef.current > 0 ? totalDurationRef.current : (videoRef.current.duration || 0);
       if (dur > 0 && cur > 5) {
         syncWatchProgress({
@@ -471,7 +577,7 @@ export default function VideoPlayer({ mediaId, mediaType = 'movie', season = 1, 
     }, 15000);
 
     return () => clearInterval(syncTimerRef.current);
-  }, [mediaId, mediaType, season, episode, meta]);
+  }, [mediaId, mediaType, season, episode, meta, autoTranscode, rawStreamData, streamUrl]);
 
   // Auto-hide controls on inactivity (3.5s)
   const resetControlsTimeout = () => {

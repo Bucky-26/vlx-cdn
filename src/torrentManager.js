@@ -58,33 +58,86 @@ function prioritizeTorrentWindow(torrentData, targetPiece = 0, rushCount = 15, f
     const rushEnd = Math.min(fileEnd, start + rushCount);
     const forwardEnd = Math.min(fileEnd, start + forwardCount);
 
+    const headerStart = fileStart;
+    const headerEnd = Math.min(fileEnd, fileStart + 3);
+    const footerStart = Math.max(fileStart, fileEnd - 2);
+    const footerEnd = fileEnd;
+
     try {
-        // 1. Container header & index critical for THIS specific file (not the whole torrent's piece 0)
-        if (torrent.critical) {
-            torrent.critical(fileStart, Math.min(fileEnd, fileStart + 3));
-            if (fileEnd - fileStart > 6) {
-                torrent.critical(fileEnd - 2, fileEnd);
+        const lastPiece = typeof torrentData.lastBufferedPiece === "number" ? torrentData.lastBufferedPiece : -1;
+        const isJump = lastPiece >= 0 && Math.abs(start - lastPiece) > 3;
+
+        // When jumping / seeking across the media timeline:
+        // Aggressively drop stale selections, clear obsolete critical flags, and cancel pending wire requests
+        if (isJump || start > headerEnd + 2) {
+            // 1. Prune internal WebTorrent selections list so swarm stops sequential walk from piece 0
+            if (torrent._selections && Array.isArray(torrent._selections._items)) {
+                torrent._selections._items = torrent._selections._items.filter(item => {
+                    if (item.to <= headerEnd) return true;
+                    if (item.from >= footerStart) return true;
+                    return (item.to >= start && item.from <= forwardEnd);
+                });
+            }
+
+            // 2. Clear out obsolete critical flags on pieces outside active seek window
+            if (torrent._critical && Array.isArray(torrent._critical)) {
+                for (let i = 0; i < torrent._critical.length; i++) {
+                    if (i <= headerEnd || i >= footerStart) continue;
+                    if (i >= start && i <= rushEnd) continue;
+                    torrent._critical[i] = false;
+                }
+            }
+
+            // 3. Deselect intermediate range before seek point
+            if (start > headerEnd + 1 && torrent.deselect) {
+                try {
+                    torrent.deselect(headerEnd + 1, start - 1);
+                } catch (e) {}
+            }
+
+            // 4. Cancel active in-flight block requests on peer wires for abandoned pieces
+            if (torrent.wires && Array.isArray(torrent.wires)) {
+                for (const wire of torrent.wires) {
+                    if (!wire || !wire.requests || !wire.cancel) continue;
+                    const pending = [...wire.requests];
+                    for (const req of pending) {
+                        const p = req.piece;
+                        const isHeader = (p >= headerStart && p <= headerEnd) || (p >= footerStart && p <= footerEnd);
+                        const isWindow = (p >= start && p <= forwardEnd);
+                        if (!isHeader && !isWindow) {
+                            try {
+                                wire.cancel(req.piece, req.offset, req.length);
+                            } catch (e) {}
+                        }
+                    }
+                }
             }
         }
 
-        // If jumping forward within the file, deselect pieces before the seek point (preserving headers)
-        if (targetPiece > fileStart + 6 && torrent.deselect) {
-            try {
-                torrent.deselect(fileStart + 4, targetPiece - 1);
-            } catch (e) {}
+        // Always protect container header & index for this file
+        if (torrent.critical) {
+            torrent.critical(headerStart, headerEnd);
+            if (fileEnd - fileStart > 6) {
+                torrent.critical(footerStart, footerEnd);
+            }
         }
 
-        // 2. Immediate rush pieces (critical hotswap)
+        // Set immediate rush pieces (critical priority)
         if (torrent.critical && start <= rushEnd) {
             torrent.critical(start, rushEnd);
         }
 
-        // 3. Forward buffer (priority 5)
+        // Set forward buffer (priority 5)
         if (torrent.select && start <= forwardEnd) {
             torrent.select(start, forwardEnd, 5);
         }
 
         torrentData.lastBufferedPiece = start;
+
+        // Wake swarm event loop immediately to dispatch new target block requests
+        if (typeof torrent._update === "function") {
+            torrent._update();
+        }
     } catch (err) {
         // Safe catch - prevent any selection range errors
     }
