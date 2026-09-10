@@ -53,31 +53,43 @@ async function handleMediaSSE(req, res, getInfo, searchTorrents) {
             fileIdx: s.fileIdx
         }));
 
+        // Max resolution for auto is 1080p (4K is available via manual selection)
+        const non4kSources = publicSources.filter((s) => {
+            const q = (s.quality || "").toLowerCase();
+            return q !== "4k" && q !== "2160p";
+        });
+        const autoSource = non4kSources[0] || publicSources[0] || null;
+
         send("meta", {
             success: true,
             mediaType: info.mediaType,
             tmdb: info,
             sources: publicSources,
-            bestSource: publicSources[0] || null,
+            bestSource: autoSource,
             qualities: qualities.length > 0 ? qualities : ["1080p"],
-            currentQuality: bestSource ? bestSource.quality : "1080p",
+            currentQuality: autoSource ? autoSource.quality : "1080p",
             totalSources: sources.length
         });
 
-        if (!bestSource) {
+        if (!autoSource) {
             send("error", { error: "No stream sources available for this title." });
             if (!closed) res.end();
             return;
         }
 
-        // ── Phase 2: Race ALL sources — first one to connect wins ──────────────
+        // ── Phase 2: Race auto sources (max res 1080p) — first one to connect wins ──
         const durationSec = info.runtime ? info.runtime * 60 : (info.mediaType === "tv" ? 3000 : 7200);
         const streamOptions = {
             season: info.season,
             episode: info.episode,
             req
         };
-        const streamPromise = prepareFastest(sources, durationSec, streamOptions);
+        const candidatesToRace = sources.filter((s) => {
+            const q = (s.quality || "").toLowerCase();
+            return q !== "4k" && q !== "2160p";
+        });
+        const finalCandidates = candidatesToRace.length > 0 ? candidatesToRace : sources;
+        const streamPromise = prepareFastest(finalCandidates, durationSec, streamOptions);
 
         // Race: either stream is ready, or client disconnects
         const result = await Promise.race([
@@ -128,11 +140,16 @@ async function handleMovie(req, res) {
     try {
         const movie = await getMovieInfo(tmdbId);
         const sources = await searchMovieTorrents(movie);
-        const bestSource = sources.length > 0 ? sources[0] : null;
+        const non4k = sources.filter((s) => {
+            const q = (s.quality || "").toLowerCase();
+            return q !== "4k" && q !== "2160p";
+        });
+        const bestSource = non4k[0] || sources[0] || null;
 
         if (bestSource) {
             const durationSec = movie.runtime ? movie.runtime * 60 : 7200;
-            prepareFastest(sources, durationSec).catch((e) => {
+            const candidates = non4k.length > 0 ? non4k : sources;
+            prepareFastest(candidates, durationSec).catch((e) => {
                 console.log("Auto-prepare stream notice:", e.message);
             });
         }
@@ -186,11 +203,16 @@ async function handleTv(req, res) {
     try {
         const tv = await getTvEpisodeInfo(tmdbId, season, episode);
         const sources = await searchTvTorrents(tv);
-        const bestSource = sources.length > 0 ? sources[0] : null;
+        const non4k = sources.filter((s) => {
+            const q = (s.quality || "").toLowerCase();
+            return q !== "4k" && q !== "2160p";
+        });
+        const bestSource = non4k[0] || sources[0] || null;
 
         if (bestSource) {
             const durationSec = tv.runtime ? tv.runtime * 60 : 3000;
-            prepareFastest(sources, durationSec, { season: tv.season, episode: tv.episode }).catch((e) => {
+            const candidates = non4k.length > 0 ? non4k : sources;
+            prepareFastest(candidates, durationSec, { season: tv.season, episode: tv.episode }).catch((e) => {
                 console.log("Auto-prepare stream notice:", e.message);
             });
         }
@@ -214,29 +236,38 @@ async function handleTv(req, res) {
     }
 }
 
+const fs = require("fs");
 // ── Browser Navigation Routes ────────────────────────────────────────────────
-const playerHtmlPath = path.join(__dirname, "..", "..", "public", "player.html");
+const clientDistHtml = path.join(__dirname, "..", "..", "client", "dist", "index.html");
+const fallbackHtml = path.join(__dirname, "..", "..", "public", "player.html");
+
+function sendPlayerHtml(res) {
+    if (fs.existsSync(clientDistHtml)) {
+        return res.sendFile(clientDistHtml);
+    }
+    return res.sendFile(fallbackHtml);
+}
 
 router.get("/movie/:tmdbid", (req, res) => {
-    // SSE API request from player.js
+    // SSE API request from player
     if (req.headers.accept && req.headers.accept.includes("text/event-stream")) {
         return handleMovie(req, res);
     }
-    res.sendFile(playerHtmlPath);
+    sendPlayerHtml(res);
 });
 
 router.get("/tv/:tmdbid/:season/:episode", (req, res) => {
     if (req.headers.accept && req.headers.accept.includes("text/event-stream")) {
         return handleTv(req, res);
     }
-    res.sendFile(playerHtmlPath);
+    sendPlayerHtml(res);
 });
 
 router.get("/tv/:tmdbid/:season/epesode/:episode", (req, res) => {
     if (req.headers.accept && req.headers.accept.includes("text/event-stream")) {
         return handleTv(req, res);
     }
-    res.sendFile(playerHtmlPath);
+    sendPlayerHtml(res);
 });
 
 router.get("/tv/:tmdbid/:season/epesode", (req, res) => {
@@ -244,7 +275,7 @@ router.get("/tv/:tmdbid/:season/epesode", (req, res) => {
         req.params.episode = "1";
         return handleTv(req, res);
     }
-    res.sendFile(playerHtmlPath);
+    sendPlayerHtml(res);
 });
 
 router.get("/tv/:tmdbid/:season", (req, res) => {
@@ -252,7 +283,7 @@ router.get("/tv/:tmdbid/:season", (req, res) => {
         req.params.episode = "1";
         return handleTv(req, res);
     }
-    res.sendFile(playerHtmlPath);
+    sendPlayerHtml(res);
 });
 
 module.exports = {

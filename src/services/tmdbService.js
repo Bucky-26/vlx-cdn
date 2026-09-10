@@ -1,5 +1,6 @@
-const { buildMagnet, formatBytes } = require("../utils");
+const { buildMagnet, formatBytes, isVideoIncompatible } = require("../utils");
 const { cacheSource } = require("../torrentManager");
+const supabaseService = require("./supabaseService");
 
 const TMDB_API_KEY = process.env.APP_TMDB_API_KEY || "ad1819cb34ec21392f6ad54a9803a091";
 const TMDB_READ_TOKEN = process.env.APP_TMDB_API_READ_ACCESS_TOKEN || "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJhZDE4MTljYjM0ZWMyMTM5MmY2YWQ1NGE5ODAzYTA5MSIsIm5iZiI6MTc0NjgwNzAwNy4wOTIsInN1YiI6IjY4MWUyOGRmODBjZTA0MThlYTZlM2NiOSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.Cgmzm9rddrMOjd4QBLumcOfrjpO4H7sSu-hS05gYLRk";
@@ -322,13 +323,13 @@ function scoreTorrent(torrent, mediaType = "movie") {
         score -= 150;
     }
 
-    // Resolution preference: 1080p is optimal for web browser
+    // Resolution preference: 1080p is optimal for web browser (max auto res is 1080p)
     if (name.includes("1080p") || name.includes("1080")) {
         score += 35;
     } else if (name.includes("720p") || name.includes("720")) {
         score += 25;
-    } else if (name.includes("2160p") || name.includes("4k")) {
-        score += 15;
+    } else if (name.includes("2160p") || name.includes("4k") || name.includes("uhd")) {
+        score -= 25; // 4K penalized for auto selection; reserved for manual choice
     } else if (name.includes("480p")) {
         score += 8;
     }
@@ -402,54 +403,77 @@ function scoreTorrent(torrent, mediaType = "movie") {
 }
 
 function hasNonEnglishAudio(name, streamTitle = "", isEnglishMedia = true) {
-    if (!isEnglishMedia) return false;
     const n = (name || "").toLowerCase();
     const st = (streamTitle || "").toLowerCase();
     const text = `${n} ${st}`;
 
-    // 1. Cyrillic characters (Russian, Ukrainian, etc.)
+    // 1. Cyrillic characters (Russian, Ukrainian, Bulgarian, etc.)
     if (/[\u0400-\u04FF]/.test(text)) return true;
 
-    // 2. Foreign release / dubbing groups and sites
+    // 2. Russian dub notations and release patterns (e.g., .D.WEBRip, D.BDRip)
+    if (/[._\s\-\[\(]d\.(webrip|web|bdrip|hdrip|telesync|cam|dvdrip)[._\s\-\]\)]/i.test(text)) {
+        return true;
+    }
+
+    // 3. Indian regional languages (Tamil, Telugu, Hindi, Malayalam, Kannada, etc.)
+    if (/\b(tamil|telugu|hindi|malayalam|kannada|bengali|marathi|punjabi|urdu)\b/i.test(text)) {
+        return true;
+    }
+
+    // 4. Foreign release / dubbing groups and sites
     const foreignGroups = [
         "lostfilm", "newstudio", "hdrezka", "rezka", "kuraj-bambey", "kuraj",
         "baibako", "coldfilm", "exkinoray", "alexfilm", "jaskier", "red head sound",
         "rhs", "viruseproject", "gears media", "hamsterstudio", "sokolov",
         "kinozal", "rutracker", "rutor", "ilcorsaronero", "sp33dy94", "mircrew",
-        "lullozzo", "alusia", "tntvillage", "mirc"
+        "lullozzo", "alusia", "tntvillage", "mirc", "cinemacity"
     ];
     for (const g of foreignGroups) {
         if (text.includes(g)) return true;
     }
 
-    // 3. Dub indicators in release name
-    if (/\b(dublado|dubbing|lektor(\s*pl)?|synchro)\b/i.test(text)) {
+    // 5. Dub / Dual Audio / Foreign hardcoded subtitle indicators
+    if (/\b(dublado|dubbing|lektor(\s*pl)?|synchro|legendado|subtitulado|multisrc|plsubbed|plsub|nlsub|nlsubbed|vostfr|subita|subfrench|subger)\b/i.test(text)) {
         return true;
+    }
+    if (/\b(dual[._\s\-]?audio|multi[._\s\-]?audio)\b/i.test(text)) {
+        // Only allow if verified English group (e.g. YTS / RARBG / PSA)
+        if (!/\b(yts|yify|rarbg|psa|qxr)\b/i.test(text)) {
+            return true;
+        }
     }
     if (/\b(dub|dubbed)\b/i.test(text) && !/\b(eng|english)\s*(dub|dubbed)\b/i.test(text)) {
         return true;
     }
 
-    // 4. Foreign audio listed first in dual audio: ITA.ENG, RUS.ENG, HINDI.ENG, etc.
-    if (/\b(ita|rus|hindi|fre|french|ger|german|spa|spanish|latino)[._\s\-\/]+(eng|english)\b/i.test(text)) {
+    // 6. Foreign audio listed in release name
+    if (/\b(ita|rus|hindi|fre|french|ger|german|spa|spanish|latino|tamil|telugu)[._\s\-\/]+(eng|english)\b/i.test(text)) {
         return true;
     }
 
-    // 5. Torrentio emoji flags: has foreign audio flag without English
+    // 7. Torrentio emoji flags: has foreign audio flag without English
     const foreignFlags = ["🇮🇹", "🇷🇺", "🇺🇦", "🇫🇷", "🇪🇸", "🇩🇪", "🇵🇹", "🇧🇷", "🇮🇳", "🇨🇿", "🇵🇱", "🇹🇷"];
     const hasForeignFlag = foreignFlags.some((f) => text.includes(f));
     const hasEngFlag = text.includes("🇬🇧") || text.includes("🇺🇸");
     if (hasForeignFlag && !hasEngFlag) return true;
 
-    // 6. Standalone foreign language tokens
+    // 7.5. Accented / Diacritic characters indicative of foreign language titles (e.g. Czech, Slovak, Polish, Hungarian)
+    if (/[áäčďéěíňóôřšťúůýžłżźńąęőű]/i.test(text)) {
+        return true;
+    }
+
+    // 8. Standalone foreign language tokens
     const foreignTokens = [
-        "french", "truefrench", "vff", "vfq", "vf2", "subfrench",
+        "french", "truefrench", "vff", "vfq", "vf2", "vostfr", "subfrench",
         "german", "deutsch",
         "italian", "ita",
         "castellano", "latino", "espanol", "español",
         "russian", "rus",
-        "hindi", "tamil", "telugu",
-        "polish", "polski"
+        "hindi", "tamil", "telugu", "kannada", "malayalam",
+        "polish", "polski",
+        "czech", "cesky", "slovak", "slovensky", "cz", "sk",
+        "hungarian", "magyar", "hun",
+        "vengadores" // Specific foreign translated titles
     ];
 
     for (const tok of foreignTokens) {
@@ -461,10 +485,7 @@ function hasNonEnglishAudio(name, streamTitle = "", isEnglishMedia = true) {
             if (subRe.test(n) || subReBefore.test(n)) {
                 continue;
             }
-            const hasEngExplicit = /\b(eng|english)\b/i.test(n) || text.includes("🇬🇧") || text.includes("🇺🇸");
-            if (!hasEngExplicit) {
-                return true;
-            }
+            return true;
         }
     }
 
@@ -482,12 +503,14 @@ function extractQuality(name) {
 }
 
 function getTop3ServersByPeers(results, isEnglishMedia = true) {
-    const clean = [];
+    const cleanNative = [];
+    const cleanOther = [];
+    const fourK = [];
     const cam = [];
 
     for (const item of results) {
-        // Exclude foreign audio dubs for English media
-        if (isEnglishMedia && hasNonEnglishAudio(item.name, item.streamTitle, true)) {
+        // Exclude foreign audio dubs strictly to guarantee only English sources
+        if (hasNonEnglishAudio(item.name, item.streamTitle, true)) {
             continue;
         }
 
@@ -508,22 +531,41 @@ function getTop3ServersByPeers(results, isEnglishMedia = true) {
 
         if (isCam) {
             cam.push(item);
+        } else if (item.quality === "4K") {
+            // Segregate 4K: max auto resolution is 1080p
+            fourK.push(item);
+        } else if (isVideoIncompatible(item.name)) {
+            // HEVC / x265 / AV1 / 10-bit releases (1080p / 720p)
+            cleanOther.push(item);
         } else {
-            clean.push(item);
+            // Native H.264 / AVC / MP4 releases (1080p / 720p)
+            cleanNative.push(item);
         }
     }
 
-    // Sort strictly by most peers (seeders first, then leechers)
+    // Sort strictly by most peers, prioritizing native web-compatible MP4 files
     const sortByPeers = (a, b) => {
-        if (b.seeders !== a.seeders) return b.seeders - a.seeders;
-        return b.leechers - a.leechers;
+        const aMp4 = (a.name || "").toLowerCase().endsWith(".mp4") ? 40 : 0;
+        const bMp4 = (b.name || "").toLowerCase().endsWith(".mp4") ? 40 : 0;
+        const aScore = (parseInt(a.seeders, 10) || 0) + aMp4;
+        const bScore = (parseInt(b.seeders, 10) || 0) + bMp4;
+        if (bScore !== aScore) return bScore - aScore;
+        return (b.leechers || 0) - (a.leechers || 0);
     };
 
-    clean.sort(sortByPeers);
+    cleanNative.sort(sortByPeers);
+    cleanOther.sort(sortByPeers);
+    fourK.sort(sortByPeers);
     cam.sort(sortByPeers);
 
-    // Prefer clean releases with active peers; fallback to cam only if no clean streams
-    const sorted = clean.length > 0 ? clean : cam;
+    // Prioritize 1080p / 720p native streams first (max auto resolution is 1080p).
+    // Followed by other 1080p / 720p, then 4K (manual user selection), then cam releases.
+    const sorted = [
+        ...cleanNative,
+        ...cleanOther,
+        ...fourK,
+        ...cam
+    ];
 
     // Return top servers formatted cleanly without size or torrent branding
     const topServers = sorted.slice(0, 5).map((item, idx) => {
@@ -580,7 +622,18 @@ async function searchMovieTorrents(movie) {
         }
     }
 
-    const top5 = getTop3ServersByPeers(results, isEnglishMedia);
+    let top5 = getTop3ServersByPeers(results, isEnglishMedia);
+
+    // Prepend curated / pinned sources from Supabase if configured
+    try {
+        const pinned = await supabaseService.getPinnedSources(movie.id, "movie");
+        if (pinned && pinned.length > 0) {
+            top5 = [...pinned, ...top5.filter(s => !pinned.some(p => p.infoHash.toLowerCase() === s.infoHash.toLowerCase()))];
+        }
+    } catch (e) {
+        console.warn("Supabase pinned source lookup error:", e.message);
+    }
+
     setCached(cacheKey, top5, 900000);
     return top5;
 }
@@ -621,7 +674,18 @@ async function searchTvTorrents(tv) {
         }
     }
 
-    const top3 = getTop3ServersByPeers(results, isEnglishMedia);
+    let top3 = getTop3ServersByPeers(results, isEnglishMedia);
+
+    // Prepend curated / pinned sources from Supabase if configured
+    try {
+        const pinned = await supabaseService.getPinnedSources(tv.id, "tv", tv.season, tv.episode);
+        if (pinned && pinned.length > 0) {
+            top3 = [...pinned, ...top3.filter(s => !pinned.some(p => p.infoHash.toLowerCase() === s.infoHash.toLowerCase()))];
+        }
+    } catch (e) {
+        console.warn("Supabase pinned source lookup error:", e.message);
+    }
+
     setCached(cacheKey, top3, 900000); // 15 min cache
     return top3;
 }

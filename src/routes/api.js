@@ -1,11 +1,32 @@
 const express = require("express");
 const { formatTime, formatBytes } = require("../utils");
 const { probeTorrentDuration } = require("../probe");
-const { getTorrentData, prepareTorrentOnServer, getSource, cleanStaleTorrents } = require("../torrentManager");
+const { getTorrentData, prepareTorrentOnServer, getSource, cleanStaleTorrents, stopTorrentStream } = require("../torrentManager");
+const { verifyStreamTicket } = require("../services/streamSecurity");
 const { handleMovie, handleTv } = require("./media");
 const { getTvSeasonEpisodes } = require("../services/tmdbService");
 
 const router = express.Router();
+
+// Client leave/stop beacon endpoint: cleans up torrent immediately if no other tabs are reading it
+router.post("/stream/stop", (req, res) => {
+    const { infoHash, ticket } = req.body || {};
+    let targetHash = (infoHash || "").toLowerCase();
+
+    if (!targetHash && ticket) {
+        try {
+            const verified = verifyStreamTicket(ticket, req);
+            if (verified.valid) {
+                targetHash = verified.infoHash;
+            }
+        } catch (e) {}
+    }
+
+    if (targetHash) {
+        stopTorrentStream(targetHash);
+    }
+    return res.json({ success: true });
+});
 
 // TMDB Media endpoints under /api — supports both JSON and SSE (Accept: text/event-stream)
 router.get("/movie/:tmdbid", handleMovie);
@@ -44,8 +65,8 @@ router.post("/source/select", async (req, res) => {
         // Use full cached source (has magnet URL) for reliable peer connection
         const cachedSource = getSource(targetId);
         const streamData = await prepareTorrentOnServer(cachedSource || targetId, duration, { season, episode, fileIdx, req });
-        // Free bandwidth from other torrents once this one is active
-        cleanStaleTorrents(targetId);
+        // Safely evict truly idle swarms if max pool size is exceeded
+        cleanStaleTorrents();
         return res.json({
             success: true,
             ...streamData

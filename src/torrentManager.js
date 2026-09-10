@@ -90,30 +90,177 @@ function prioritizeTorrentWindow(torrentData, targetPiece = 0, rushCount = 15, f
     }
 }
 
+const cp = require("child_process");
+
+function killChildProcess(proc) {
+    if (!proc || proc.killed) return;
+    try {
+        if (process.platform === "win32" && proc.pid) {
+            cp.exec(`taskkill /pid ${proc.pid} /T /F`, () => {});
+        } else {
+            proc.kill("SIGKILL");
+        }
+    } catch (e) {}
+}
+
+const MAX_CONCURRENT_SWARMS = 10;
+const IDLE_SWARM_TIMEOUT_MS = 60 * 1000; // 60 seconds without active readers or requests
+
 /**
- * Frees up connections and bandwidth by destroying any background torrents
- * other than the currently playing infoHash.
+ * Destroys a torrent safely, freeing RAM, chunk store, and stopping swarm activity.
+ * If force === true, destroys immediately regardless of active readers or grace period.
+ * If force === false, protects active streams with activeReaders > 0 or recent activity.
  */
-function cleanStaleTorrents(activeInfoHash) {
+function destroyTorrent(infoHash, force = false) {
+    if (!client || !client.torrents) return false;
+    const hash = (infoHash || "").toLowerCase();
+    const data = torrents.get(hash);
+
+    if (data) {
+        // Protect torrents actively being read by another browser tab unless forced
+        if (!force && data.activeReaders && data.activeReaders > 0) {
+            return false;
+        }
+
+        // Grace period for paused/buffering tabs unless forced
+        if (!force && data.lastAccessed && (Date.now() - data.lastAccessed < IDLE_SWARM_TIMEOUT_MS)) {
+            return false;
+        }
+
+        if (data.activeProcs) {
+            for (const proc of data.activeProcs) {
+                killChildProcess(proc);
+            }
+            data.activeProcs.clear();
+        }
+        torrents.delete(hash);
+    }
+
+    const t = client.torrents ? client.torrents.find(tor => (tor.infoHash || "").toLowerCase() === hash) : null;
+    if (t) {
+        try {
+            console.log("[TorrentManager] Removing unused torrent:", t.name || hash);
+            if (typeof client.remove === "function") {
+                const res = client.remove(t, { destroyStore: true });
+                if (res && typeof res.catch === "function") {
+                    res.catch(() => {});
+                }
+            }
+            return true;
+        } catch (e) {}
+    }
+    return false;
+}
+
+/**
+ * Removes only the losing candidate sources of a specific discovery race,
+ * leaving all other active user tabs and streams completely intact!
+ */
+function cleanRaceCandidates(candidateSources, winnerHash) {
+    if (!client || !client.torrents || !candidateSources) return;
+    const winner = (winnerHash || "").toLowerCase();
+
+    const candidateHashes = candidateSources
+        .map(s => (typeof s === "string" ? s : s.infoHash || "").toLowerCase())
+        .filter(h => h && h !== winner);
+
+    for (const hash of candidateHashes) {
+        destroyTorrent(hash, false);
+    }
+}
+
+/**
+ * Automatically cleans any torrent that is no longer in use.
+ * Evaluates all swarms and evicts those with 0 active readers whose idle timeout has elapsed.
+ */
+function cleanIdleTorrents(idleTimeoutMs = IDLE_SWARM_TIMEOUT_MS) {
     if (!client || !client.torrents) return;
-    const currentKey = (activeInfoHash || "").toLowerCase();
+    const now = Date.now();
 
     for (const t of [...client.torrents]) {
         const hash = (t.infoHash || "").toLowerCase();
-        if (hash !== currentKey) {
-            console.log("Removing background torrent to maximize bandwidth and disk space:", t.name || hash);
-            try {
-                torrents.delete(hash);
-                client.remove(t, { destroyStore: true });
-            } catch (e) {}
+        const data = torrents.get(hash);
+        const readers = (data && data.activeReaders) || 0;
+        const lastAccess = (data && data.lastAccessed) || 0;
+
+        // If not being used (0 active readers) and idle timeout elapsed, remove it!
+        if (readers === 0 && (now - lastAccess > idleTimeoutMs)) {
+            console.log(`[TorrentManager] Idle timeout (${Math.round((now - lastAccess)/1000)}s) reached. Evicting ${t.name || hash}`);
+            destroyTorrent(hash, true);
         }
     }
 }
 
+/**
+ * Manages memory and bandwidth pool across concurrent browser tabs.
+ * Removes any idle swarms and keeps total swarms within MAX_CONCURRENT_SWARMS.
+ */
+function cleanStaleTorrents() {
+    if (!client || !client.torrents) return;
+
+    // 1. First remove any torrents not being used
+    cleanIdleTorrents(IDLE_SWARM_TIMEOUT_MS);
+
+    // 2. If pool still exceeds MAX_CONCURRENT_SWARMS, evict oldest idle swarms even sooner
+    if (client.torrents.length > MAX_CONCURRENT_SWARMS) {
+        const idleList = [];
+        for (const t of client.torrents) {
+            const hash = (t.infoHash || "").toLowerCase();
+            const data = torrents.get(hash);
+            const readers = (data && data.activeReaders) || 0;
+            const lastAccess = (data && data.lastAccessed) || 0;
+
+            if (readers === 0) {
+                idleList.push({ hash, lastAccess });
+            }
+        }
+
+        idleList.sort((a, b) => a.lastAccess - b.lastAccess);
+
+        while (client.torrents.length > MAX_CONCURRENT_SWARMS && idleList.length > 0) {
+            const toEvict = idleList.shift();
+            destroyTorrent(toEvict.hash, true);
+        }
+    }
+}
+
+/**
+ * Called when a user closes a player tab, navigates away, or switches video.
+ * Decrements reader count and schedules swift cleanup if no other tab is watching.
+ */
+function stopTorrentStream(infoHash, delayMs = 3000) {
+    const hash = (infoHash || "").toLowerCase();
+    const data = torrents.get(hash);
+    if (!data) return;
+
+    data.activeReaders = Math.max(0, (data.activeReaders || 1) - 1);
+    data.lastAccessed = Date.now();
+
+    if (data.activeReaders === 0) {
+        setTimeout(() => {
+            const current = torrents.get(hash);
+            if (current && (!current.activeReaders || current.activeReaders === 0)) {
+                console.log(`[TorrentManager] Stream stop requested and no active readers. Destroying ${hash}`);
+                destroyTorrent(hash, true);
+            }
+        }, delayMs);
+    }
+}
+
+// Background idle reaper running every 20 seconds
+setInterval(() => {
+    try {
+        cleanIdleTorrents(IDLE_SWARM_TIMEOUT_MS);
+    } catch (e) {
+        console.error("Auto idle torrent reaper error:", e.message);
+    }
+}, 20000);
+
 const path = require("path");
-const { VIDEO_EXTENSIONS, TRACKERS, isAudioIncompatible, formatTime, buildMagnet } = require("./utils");
+const { VIDEO_EXTENSIONS, TRACKERS, isAudioIncompatible, isVideoIncompatible, needsTranscoding, formatTime, buildMagnet } = require("./utils");
 const { probeTorrentDuration } = require("./probe");
 const { generateStreamTicket } = require("./services/streamSecurity");
+
 
 /**
  * Selects the correct video file from a torrent based on season/episode and fileIdx.
@@ -331,7 +478,7 @@ async function prepareTorrentOnServer(sourceOrHash, duration = 0, options = {}) 
             transcodeUrl: `/stream/play/${ticket}?transcode=audio`,
             duration: data.duration || 0,
             durationFormatted: formatTime(data.duration || 0),
-            needsTranscode: isAudioIncompatible(data.file.name)
+            needsTranscode: needsTranscoding(data.file.name)
         };
     }
 
@@ -380,18 +527,24 @@ async function prepareTorrentOnServer(sourceOrHash, duration = 0, options = {}) 
 
             const file = selectEpisodeFile(videoFiles, options.season, options.episode, preferredIdx);
 
-            try { torrent.files.forEach((f) => f.deselect()); } catch (e) {}
-            try { file.select(); } catch (e) {}
+            // Deselect whole torrent so peers focus exclusively on first playback pieces
+            try { torrent.deselect(0, torrent.pieces.length - 1, 0); } catch (e) {}
 
             const torrentData = {
                 torrent, file,
                 duration: Number(duration) || 0,
                 currentPiece: file._startPiece || 0,
-                lastBufferedPiece: file._startPiece || 0
+                lastBufferedPiece: file._startPiece || 0,
+                activeProcs: new Set(),
+                activeReaders: 0,
+                lastAccessed: Date.now(),
+                isVideoIncompatible: isVideoIncompatible(file.name)
             };
             setTorrentData(infoHash, torrentData);
-            prioritizeTorrentWindow(torrentData, file._startPiece || 0, 15, 60);
-            probeTorrentDuration(torrentData).catch(() => {});
+            prioritizeTorrentWindow(torrentData, file._startPiece || 0, 8, 40);
+            if (!torrentData.duration || torrentData.duration <= 0) {
+                probeTorrentDuration(torrentData).catch(() => {});
+            }
 
             console.log(`Server prepared stream for ${file.name} (${infoHash})`);
 
@@ -407,7 +560,7 @@ async function prepareTorrentOnServer(sourceOrHash, duration = 0, options = {}) 
                 transcodeUrl: `/stream/play/${ticket}?transcode=audio`,
                 duration: torrentData.duration || 0,
                 durationFormatted: formatTime(torrentData.duration || 0),
-                needsTranscode: isAudioIncompatible(file.name)
+                needsTranscode: needsTranscoding(file.name)
             });
         }
 
@@ -486,8 +639,8 @@ async function prepareFastest(sources, duration = 0, options = {}) {
                     won = true;
                     clearTimeout(timeoutTimer);
                     const winnerHash = (result.infoHash || "").toLowerCase();
-                    // Destroy losing candidates immediately to allocate full bandwidth to winner
-                    setTimeout(() => cleanStaleTorrents(winnerHash), 50);
+                    // Clean only losing candidates of this race; preserve all other active browser tabs
+                    setTimeout(() => cleanRaceCandidates(candidates, winnerHash), 50);
                     resolve(result);
                 })
                 .catch((err) => {
@@ -506,6 +659,7 @@ function destroyClient() {
         if (client) {
             client.destroy(() => {
                 client = null;
+                torrents.clear();
                 resolve();
             });
         } else {
@@ -523,6 +677,10 @@ module.exports = {
     hasTorrent,
     prioritizeTorrentWindow,
     cleanStaleTorrents,
+    cleanIdleTorrents,
+    cleanRaceCandidates,
+    destroyTorrent,
+    stopTorrentStream,
     prepareTorrentOnServer,
     prepareFastest,
     cacheSource,

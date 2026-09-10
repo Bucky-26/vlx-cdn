@@ -1,7 +1,8 @@
 const express = require("express");
+const path = require("path");
 const cp = require("child_process");
 const { getFfmpegPath } = require("../ffmpegHelper");
-const { getMimeType } = require("../utils");
+const { getMimeType, isVideoIncompatible, isAudioIncompatible } = require("../utils");
 const {
     getTorrentData,
     prioritizeTorrentWindow,
@@ -28,7 +29,7 @@ async function handleStreamPlayback(req, res, infoHash, targetFileIdx = null, ti
         try {
             const cachedSource = getSource(infoHash);
             await prepareTorrentOnServer(cachedSource || infoHash, 0, { fileIdx: targetFileIdx, req });
-            cleanStaleTorrents(infoHash);
+            cleanStaleTorrents();
             torrentData = getTorrentData(infoHash);
         } catch (err) {
             console.error("Stream on-demand preparation error:", err.message);
@@ -39,6 +40,20 @@ async function handleStreamPlayback(req, res, infoHash, targetFileIdx = null, ti
     if (!torrentData) {
         return res.status(404).send("Stream not found");
     }
+
+    // Track active reader for this tab so background GC never interrupts it
+    torrentData.activeReaders = (torrentData.activeReaders || 0) + 1;
+    torrentData.lastAccessed = Date.now();
+
+    let readerCleaned = false;
+    const releaseReader = () => {
+        if (readerCleaned) return;
+        readerCleaned = true;
+        torrentData.activeReaders = Math.max(0, (torrentData.activeReaders || 1) - 1);
+        torrentData.lastAccessed = Date.now();
+    };
+    res.on("close", releaseReader);
+    res.on("finish", releaseReader);
 
     // Resolve target file: prefer exact targetFileIdx if specified
     let file = torrentData.file;
@@ -58,11 +73,34 @@ async function handleStreamPlayback(req, res, infoHash, targetFileIdx = null, ti
     const pieceLength = torrent && torrent.pieceLength ? torrent.pieceLength : 1048576;
     const totalPieces = torrent && torrent.pieces ? torrent.pieces.length : 1;
 
-    // ── Transcode Audio to AAC (Low-CPU Mode: -threads 2, ultrafast preset) ──
-    if (req.query.transcode === "audio" || req.query.transcode === "true" || req.query.transcode === "1") {
+    // ── Transcode Audio to AAC & Incompatible Video to H.264 (Low-CPU Mode) ──
+    const fileExt = path.extname(file.name || "").toLowerCase();
+    const isCleanMp4 = fileExt === ".mp4" || fileExt === ".m4v";
+    const forceTranscode = req.query.transcode === "audio" || req.query.transcode === "true" || req.query.transcode === "1";
+
+    // If file is already a clean MP4 with compatible video and audio, bypass FFmpeg and stream directly via HTTP 206
+    const actuallyNeedsTranscode = forceTranscode && (
+        !isCleanMp4 ||
+        torrentData.isVideoIncompatible ||
+        isVideoIncompatible(file.name) ||
+        isAudioIncompatible(file.name)
+    );
+
+    if (actuallyNeedsTranscode) {
         const startTime = Math.max(0, parseFloat(req.query.t || req.query.start || req.query.ss || "0"));
         const port = process.env.PORT || 3000;
         const resolvedIdx = torrent && torrent.files ? torrent.files.indexOf(file) : -1;
+
+        const needsVideoTranscode = Boolean(
+            torrentData.isVideoIncompatible ||
+            isVideoIncompatible(file.name)
+        );
+
+        const videoCodecArgs = needsVideoTranscode
+            ? ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-crf", "23"]
+            : ["-c:v", "copy", "-bsf:v", "dump_extra"];
+
+        const audioCodecArgs = ["-c:a", "aac", "-ac", "2", "-b:a", "192k"];
 
         res.writeHead(200, {
             "Content-Type": "video/mp4",
@@ -71,106 +109,73 @@ async function handleStreamPlayback(req, res, infoHash, targetFileIdx = null, ti
             "Cache-Control": "no-cache, no-store, must-revalidate"
         });
 
-        let fileStream = null;
-        let ffmpegArgs = [];
-
-        if (startTime > 0) {
-            // Prioritize swarm pieces at target seek position before spawning FFmpeg
-            if (torrentData.duration > 0) {
-                const approxByte = Math.floor((startTime / torrentData.duration) * file.length);
-                const targetPiece = Math.max(0, Math.min(
-                    totalPieces - 1,
-                    Math.floor((fileOffset + approxByte) / pieceLength)
-                ));
-                prioritizeTorrentWindow(torrentData, targetPiece, 15, 60);
-            }
-
-            // Internal authenticated loopback seek: low CPU (-threads 2, -preset ultrafast)
-            ffmpegArgs = [
-                "-loglevel", "warning",
-                "-threads", "2",
-                "-headers", `X-Internal-Token: ${INTERNAL_SECRET}\r\n`,
-                "-seekable", "1",
-                "-reconnect", "1",
-                "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "2",
-                "-analyzeduration", "1000000",
-                "-probesize", "1000000",
-                "-fflags", "+fastseek+nobuffer",
-                "-flags", "+low_delay",
-                "-noaccurate_seek",
-                "-ss", String(startTime),
-                "-i", `http://127.0.0.1:${port}/stream/internal?h=${infoHash}&f=${resolvedIdx}`,
-                "-map", "0:v:0",
-                "-map", "0:a:0?",
-                "-sn",
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-ac", "2",
-                "-b:a", "192k",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-flush_packets", "1",
-                "-frag_duration", "300000",
-                "-max_muxing_queue_size", "2048",
-                "-f", "mp4",
-                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-                "pipe:1"
-            ];
+        // Prioritize torrent piece window
+        if (torrentData.duration > 0 && startTime > 0) {
+            const approxByte = Math.floor((startTime / torrentData.duration) * file.length);
+            const targetPiece = Math.max(0, Math.min(
+                totalPieces - 1,
+                Math.floor((fileOffset + approxByte) / pieceLength)
+            ));
+            prioritizeTorrentWindow(torrentData, targetPiece, 15, 60);
         } else {
             prioritizeTorrentWindow(torrentData, file._startPiece || 0, 15, 60);
-            fileStream = file.createReadStream({ highWaterMark: 2 * 1024 * 1024 }); // 2MB chunk buffer for low RAM
-            ffmpegArgs = [
-                "-loglevel", "warning",
-                "-threads", "2",
-                "-analyzeduration", "1000000",
-                "-probesize", "1000000",
-                "-fflags", "+fastseek+nobuffer",
-                "-flags", "+low_delay",
-                "-i", "pipe:0",
-                "-map", "0:v:0",
-                "-map", "0:a:0?",
-                "-sn",
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-ac", "2",
-                "-b:a", "192k",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-flush_packets", "1",
-                "-frag_duration", "300000",
-                "-max_muxing_queue_size", "2048",
-                "-f", "mp4",
-                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-                "pipe:1"
-            ];
         }
+
+        // Always feed FFmpeg via the internal seekable loopback endpoint so FFmpeg can issue HTTP 206 Range requests
+        // to parse container headers, index tables, and seek points immediately without buffering unseekable pipes!
+        const seekArgs = startTime > 0 ? ["-noaccurate_seek", "-ss", String(startTime)] : [];
+
+        const ffmpegArgs = [
+            "-loglevel", "warning",
+            "-threads", "2",
+            "-headers", `X-Internal-Token: ${INTERNAL_SECRET}\r\n`,
+            "-seekable", "1",
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "2",
+            "-analyzeduration", "1000000",
+            "-probesize", "1000000",
+            "-fflags", "+fastseek+nobuffer",
+            "-flags", "+low_delay",
+            ...seekArgs,
+            "-i", `http://127.0.0.1:${port}/stream/internal?h=${infoHash}&f=${resolvedIdx}&token=${INTERNAL_SECRET}`,
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-sn",
+            ...videoCodecArgs,
+            ...audioCodecArgs,
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-flush_packets", "1",
+            "-frag_duration", "200000",
+            "-max_muxing_queue_size", "4096",
+            "-f", "mp4",
+            "-movflags", "frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets+delay_moov",
+            "pipe:1"
+        ];
 
         const ffmpegBin = getFfmpegPath();
         const proc = cp.spawn(ffmpegBin, ffmpegArgs);
-        if (fileStream) {
-            fileStream.pipe(proc.stdin);
-        }
+        torrentData.activeProcs = torrentData.activeProcs || new Set();
+        torrentData.activeProcs.add(proc);
+
         proc.stdout.pipe(res);
 
         let isCleanedUp = false;
         const cleanup = () => {
             if (isCleanedUp) return;
             isCleanedUp = true;
-            if (fileStream) {
-                try { fileStream.destroy(); } catch (e) {}
+            if (torrentData.activeProcs) {
+                torrentData.activeProcs.delete(proc);
             }
-            try { proc.kill("SIGKILL"); } catch (e) {}
-        };
-
-        if (fileStream) {
-            fileStream.on("error", (err) => {
-                if (err.code !== "PREMATURE_CLOSE" && err.code !== "ERR_STREAM_PREMATURE_CLOSE") {
-                    console.error("File stream transcode error:", err.message);
+            try {
+                if (process.platform === "win32" && proc.pid) {
+                    cp.exec(`taskkill /pid ${proc.pid} /T /F`, () => {});
+                } else {
+                    proc.kill("SIGKILL");
                 }
-                cleanup();
-            });
-        }
+            } catch (e) {}
+        };
 
         proc.on("error", (err) => {
             console.error("FFmpeg spawn error:", err.message);
@@ -303,8 +308,9 @@ router.get("/play/:ticket", (req, res) => {
 // Reserved exclusively for internal FFmpeg seeking.
 // ─────────────────────────────────────────────────────────────────────────────
 router.get("/internal", (req, res) => {
-    const isLoopback = req.ip === "127.0.0.1" || req.ip === "::1" || req.ip === "::ffff:127.0.0.1";
-    const internalToken = req.headers["x-internal-token"];
+    const remoteIp = req.socket?.remoteAddress || req.ip || "";
+    const isLoopback = remoteIp.includes("127.0.0.1") || remoteIp === "::1" || req.ip === "127.0.0.1" || req.ip === "::1" || req.ip === "::ffff:127.0.0.1";
+    const internalToken = req.headers["x-internal-token"] || req.query.token;
 
     if (!isLoopback || internalToken !== INTERNAL_SECRET) {
         return res.status(403).send("Forbidden: Internal endpoint.");

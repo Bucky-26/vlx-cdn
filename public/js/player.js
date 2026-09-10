@@ -216,14 +216,14 @@ function initPlyr() {
     plyrInstance = new Plyr(videoEl, {
         controls: [
             'play-large',
-            'rewind',
             'play',
+            'rewind',
             'fast-forward',
-            'progress',
-            'current-time',
-            'duration',
             'mute',
             'volume',
+            'current-time',
+            'progress',
+            'duration',
             'settings',
             'pip',
             'fullscreen'
@@ -232,7 +232,7 @@ function initPlyr() {
         speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 2] },
         seekTime: 10,
         keyboard: { focused: true, global: true },
-        tooltips: { controls: true, seek: true },
+        tooltips: { controls: false, seek: true },
         storage: { enabled: false },
         hideControls: false,
         duration: totalDuration > 0 ? totalDuration : undefined
@@ -280,18 +280,57 @@ function initPlyr() {
                 scheduleControlsHide(CONTROLS_HIDE_DELAY_MS);
             });
         }
+
+        // Inject bottom brand watermark logo (viewlix.png)
+        const injectBottomBrand = () => {
+            const ctrlEl = plyrInstance.elements?.controls || document.querySelector('.plyr__controls');
+            if (!ctrlEl || ctrlEl.querySelector('.plyr__brand-watermark')) return;
+
+            const brandDiv = document.createElement('div');
+            brandDiv.className = 'plyr__controls__item plyr__brand-watermark';
+            brandDiv.innerHTML = `
+                <a href="/" class="bottom-brand-link" title="Viewlix" target="_blank" rel="noopener">
+                    <img src="/images/viewlix.png" onerror="this.src='https://viewlix.site/viewlix.png'" alt="Viewlix" class="bottom-brand-logo">
+                </a>
+            `;
+
+            const menuEl = ctrlEl.querySelector('.plyr__menu');
+            if (menuEl) {
+                ctrlEl.insertBefore(brandDiv, menuEl);
+            } else {
+                const fsEl = ctrlEl.querySelector('[data-plyr="fullscreen"]');
+                if (fsEl) {
+                    ctrlEl.insertBefore(brandDiv, fsEl);
+                } else {
+                    ctrlEl.appendChild(brandDiv);
+                }
+            }
+        };
+
+        injectBottomBrand();
+        plyrInstance.on('ready', injectBottomBrand);
     }, 150);
 
     // Buffering & Loading Animation Handlers
+    let stallTimer = null;
+
     plyrInstance.on('waiting', () => {
         showBuffering();
     });
 
     plyrInstance.on('stalled', () => {
         showBuffering();
+        clearTimeout(stallTimer);
+        // If stalled for > 5 seconds while video has buffered data, nudge playback
+        stallTimer = setTimeout(() => {
+            if (videoEl && !videoEl.paused && videoEl.readyState >= 2) {
+                videoEl.play().catch(() => {});
+            }
+        }, 5000);
     });
 
     plyrInstance.on('canplay', () => {
+        clearTimeout(stallTimer);
         hideBuffering();
         updateProgressBar();
     });
@@ -547,6 +586,10 @@ function getEffectiveDuration() {
 function loadVideoStream(startTime = 0) {
     if (!currentStreamData) return;
 
+    if (totalDuration > 60 && startTime >= totalDuration - 20) {
+        startTime = 0;
+    }
+
     let targetUrl = currentStreamData.streamUrl;
     if (isAudioTranscode) {
         streamTimeOffset = startTime;
@@ -662,11 +705,15 @@ async function startStreamForSource(source) {
         if (initialTime === 0 && resumeStorageKey) {
             const savedSec = parseInt(localStorage.getItem(resumeStorageKey), 10);
             if (savedSec && savedSec > 10) {
-                initialTime = savedSec;
-                if (resumeText) resumeText.innerText = `Resumed at ${formatTime(savedSec)}`;
-                if (resumePill) {
-                    resumePill.style.display = "flex";
-                    setTimeout(() => { resumePill.style.display = "none"; }, 7000);
+                if (totalDuration > 60 && savedSec >= totalDuration - 30) {
+                    localStorage.removeItem(resumeStorageKey);
+                } else {
+                    initialTime = savedSec;
+                    if (resumeText) resumeText.innerText = `Resumed at ${formatTime(savedSec)}`;
+                    if (resumePill) {
+                        resumePill.style.display = "flex";
+                        setTimeout(() => { resumePill.style.display = "none"; }, 7000);
+                    }
                 }
             }
         }
@@ -1161,11 +1208,15 @@ async function initPlayer() {
             if (resumeStorageKey) {
                 const savedSec = parseInt(localStorage.getItem(resumeStorageKey), 10);
                 if (savedSec && savedSec > 10) {
-                    initialTime = savedSec;
-                    if (resumeText) resumeText.innerText = `Resumed at ${formatTime(savedSec)}`;
-                    if (resumePill) {
-                        resumePill.style.display = "flex";
-                        setTimeout(() => { resumePill.style.display = "none"; }, 7000);
+                    if (totalDuration > 60 && savedSec >= totalDuration - 30) {
+                        localStorage.removeItem(resumeStorageKey);
+                    } else {
+                        initialTime = savedSec;
+                        if (resumeText) resumeText.innerText = `Resumed at ${formatTime(savedSec)}`;
+                        if (resumePill) {
+                            resumePill.style.display = "flex";
+                            setTimeout(() => { resumePill.style.display = "none"; }, 7000);
+                        }
                     }
                 }
             }
@@ -1221,3 +1272,26 @@ if (document.readyState === "loading") {
 } else {
     safeInitPlayer();
 }
+
+
+// Clear focus from player buttons after click to prevent sticky tooltips or focus rings
+document.addEventListener('mouseup', (e) => {
+    const btn = e.target.closest('.plyr__controls button, .plyr__controls [data-plyr]');
+    if (btn) btn.blur();
+});
+
+// Release active stream immediately when tab closes or navigates away
+window.addEventListener("beforeunload", () => {
+    if (activeSource && activeSource.infoHash) {
+        try {
+            navigator.sendBeacon("/api/stream/stop", new Blob([JSON.stringify({ infoHash: activeSource.infoHash })], { type: "application/json" }));
+        } catch (e) {}
+    }
+});
+window.addEventListener("pagehide", () => {
+    if (activeSource && activeSource.infoHash) {
+        try {
+            navigator.sendBeacon("/api/stream/stop", new Blob([JSON.stringify({ infoHash: activeSource.infoHash })], { type: "application/json" }));
+        } catch (e) {}
+    }
+});
