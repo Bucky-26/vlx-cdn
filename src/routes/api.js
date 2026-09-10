@@ -33,7 +33,7 @@ router.get("/tv/:tmdbid/season/:season/episodes", async (req, res) => {
 
 // Server-side source selection & activation (when user switches quality or server)
 router.post("/source/select", async (req, res) => {
-    const { id, infoHash, duration } = req.body;
+    const { id, infoHash, duration, season, episode, fileIdx } = req.body;
     const targetId = (id || infoHash || "").toLowerCase();
 
     if (!targetId) {
@@ -43,7 +43,7 @@ router.post("/source/select", async (req, res) => {
     try {
         // Use full cached source (has magnet URL) for reliable peer connection
         const cachedSource = getSource(targetId);
-        const streamData = await prepareTorrentOnServer(cachedSource || targetId, duration);
+        const streamData = await prepareTorrentOnServer(cachedSource || targetId, duration, { season, episode, fileIdx, req });
         // Free bandwidth from other torrents once this one is active
         cleanStaleTorrents(targetId);
         return res.json({

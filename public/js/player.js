@@ -234,6 +234,7 @@ function initPlyr() {
         keyboard: { focused: true, global: true },
         tooltips: { controls: true, seek: true },
         storage: { enabled: false },
+        hideControls: false,
         duration: totalDuration > 0 ? totalDuration : undefined
     });
 
@@ -264,6 +265,19 @@ function initPlyr() {
                     const targetSec = (pct / 100) * dur;
                     seekToTime(targetSec);
                 }
+            });
+        }
+
+        // Attach hover protectors to Plyr controls bar so it NEVER disappears while mouse is over it
+        const controlsEl = plyrInstance.elements?.controls || document.querySelector('.plyr__controls');
+        if (controlsEl) {
+            controlsEl.addEventListener('mouseenter', () => {
+                isControlsHovered = true;
+                showPlayerControls();
+            });
+            controlsEl.addEventListener('mouseleave', () => {
+                isControlsHovered = false;
+                scheduleControlsHide(CONTROLS_HIDE_DELAY_MS);
             });
         }
     }, 150);
@@ -333,24 +347,13 @@ function initPlyr() {
     plyrInstance.on('playing', () => {
         hideBuffering();
         updateProgressBar();
-        resetControlsTimer();
+        showPlayerControls();
+        scheduleControlsHide(CONTROLS_HIDE_DELAY_MS);
         if (unmutePill) unmutePill.style.display = "none";
     });
 
     plyrInstance.on('pause', () => {
-        playerRoot.classList.remove("hide-controls");
-    });
-
-    plyrInstance.on('controlsshown', () => {
-        playerRoot.classList.remove("hide-controls");
-    });
-
-    plyrInstance.on('controlshidden', () => {
-        const isDrawerOpen = episodesDrawer && episodesDrawer.classList.contains("open");
-        const isModalOpen = serverModal && serverModal.classList.contains("open");
-        if (!isDrawerOpen && !isModalOpen) {
-            playerRoot.classList.add("hide-controls");
-        }
+        showPlayerControls();
     });
 
     plyrInstance.on('ended', () => {
@@ -363,25 +366,70 @@ function initPlyr() {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   IDLE CONTROLS AUTO-HIDE & MOBILE TOUCH HANDLING
+   UNIFIED CONTROLS VISIBILITY MANAGER (DESKTOP & MOBILE)
    ───────────────────────────────────────────────────────────────────────────── */
 
-function resetControlsTimer() {
+const CONTROLS_HIDE_DELAY_MS = 5000; // Auto-hide controls after 5 seconds of inactivity
+let controlsIdleTimer = null;
+let isControlsHovered = false;
+
+function showPlayerControls() {
+    clearTimeout(controlsIdleTimer);
     playerRoot.classList.remove("hide-controls");
-    clearTimeout(controlsTimeout);
-    if (plyrInstance && plyrInstance.playing) {
-        controlsTimeout = setTimeout(() => {
-            const isDrawerOpen = episodesDrawer && episodesDrawer.classList.contains("open");
-            const isModalOpen = serverModal && serverModal.classList.contains("open");
-            if (!isDrawerOpen && !isModalOpen) {
-                playerRoot.classList.add("hide-controls");
-            }
-        }, 2800);
+    if (plyrInstance && plyrInstance.toggleControls) {
+        plyrInstance.toggleControls(true);
     }
 }
 
-playerRoot.addEventListener("mousemove", resetControlsTimer);
-playerRoot.addEventListener("click", resetControlsTimer);
+function scheduleControlsHide(delay = CONTROLS_HIDE_DELAY_MS) {
+    clearTimeout(controlsIdleTimer);
+    if (!videoEl || videoEl.paused || isControlsHovered) {
+        playerRoot.classList.remove("hide-controls");
+        return;
+    }
+    const isDrawerOpen = episodesDrawer && episodesDrawer.classList.contains("open");
+    const isModalOpen = serverModal && serverModal.classList.contains("open");
+    if (isDrawerOpen || isModalOpen) {
+        playerRoot.classList.remove("hide-controls");
+        return;
+    }
+
+    controlsIdleTimer = setTimeout(() => {
+        if (!videoEl || videoEl.paused || isControlsHovered) {
+            playerRoot.classList.remove("hide-controls");
+            return;
+        }
+        const isDrawerOpen = episodesDrawer && episodesDrawer.classList.contains("open");
+        const isModalOpen = serverModal && serverModal.classList.contains("open");
+        if (!isDrawerOpen && !isModalOpen) {
+            playerRoot.classList.add("hide-controls");
+        }
+    }, delay);
+}
+
+function onUserActivity() {
+    showPlayerControls();
+    scheduleControlsHide(CONTROLS_HIDE_DELAY_MS);
+}
+
+// Global activity listeners for desktop mouse & mobile touch
+playerRoot.addEventListener("mousemove", onUserActivity);
+playerRoot.addEventListener("mousedown", onUserActivity);
+playerRoot.addEventListener("pointermove", onUserActivity);
+playerRoot.addEventListener("touchmove", onUserActivity, { passive: true });
+
+// Protect top-bar from auto-hiding when hovered
+const topBarEl = document.getElementById("topBar");
+if (topBarEl) {
+    topBarEl.addEventListener("mouseenter", () => {
+        isControlsHovered = true;
+        showPlayerControls();
+    });
+    topBarEl.addEventListener("mouseleave", () => {
+        isControlsHovered = false;
+        scheduleControlsHide(CONTROLS_HIDE_DELAY_MS);
+    });
+}
 
 // Mobile Double-Tap to Seek (10s back / 10s forward)
 let lastTapTime = 0;
@@ -426,7 +474,7 @@ function handleMobileDoubleTap(clientX) {
 }
 
 playerRoot.addEventListener("touchstart", (e) => {
-    resetControlsTimer();
+    onUserActivity();
     if (e.touches && e.touches.length === 1) {
         const touch = e.touches[0];
         // Skip double tap if interacting with interactive UI elements
@@ -502,7 +550,8 @@ function loadVideoStream(startTime = 0) {
     let targetUrl = currentStreamData.streamUrl;
     if (isAudioTranscode) {
         streamTimeOffset = startTime;
-        targetUrl = `${currentStreamData.transcodeUrl}&t=${startTime}`;
+        const sep = (currentStreamData.transcodeUrl || "").includes("?") ? "&" : "?";
+        targetUrl = `${currentStreamData.transcodeUrl}${sep}t=${startTime}`;
     }
 
     spinner.style.display = "none";
@@ -569,10 +618,19 @@ async function startStreamForSource(source) {
     }
 
     try {
+        const season = currentMedia && currentMedia.tmdb ? currentMedia.tmdb.season : undefined;
+        const episode = currentMedia && currentMedia.tmdb ? currentMedia.tmdb.episode : undefined;
         const res = await fetch("/api/source/select", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: source.id, infoHash: source.infoHash, duration: totalDuration })
+            body: JSON.stringify({
+                id: source.id,
+                infoHash: source.infoHash,
+                fileIdx: source.fileIdx,
+                season,
+                episode,
+                duration: totalDuration
+            })
         });
 
         const data = await res.json();

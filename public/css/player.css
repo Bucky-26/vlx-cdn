@@ -161,30 +161,35 @@ html, body {
     margin-right: 0 !important;
 }
 
+/* Ensure all control items have consistent spacing */
+.plyr__controls .plyr__controls__item {
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+}
+
 .plyr__controls {
     background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.55) 60%, transparent 100%) !important;
-    padding: 28px 24px 16px !important;
+    padding: 24px 20px 14px !important;
     display: flex !important;
     align-items: center !important;
     gap: 6px !important;
+    z-index: 30 !important;
+    pointer-events: auto !important;
     transition: opacity 0.3s ease, transform 0.3s ease !important;
 }
 
-/* Controls buttons consistent sizing on desktop */
-.plyr__controls [data-plyr="play"],
-.plyr__controls [data-plyr="rewind"],
-.plyr__controls [data-plyr="fast-forward"] {
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    width: 36px !important;
-    height: 36px !important;
+/* Push menu and fullscreen to the right */
+.plyr__controls .plyr__menu {
+    margin-left: auto !important;
 }
 
-/* Push menu and fullscreen to the right */
-.plyr__controls .plyr__menu,
-.plyr__controls [data-plyr="settings"] {
-    margin-left: auto !important;
+/* Time displays — consistent sizing */
+.plyr__controls .plyr__time {
+    font-size: 0.85rem !important;
+    font-weight: 600 !important;
+    color: #e2e8f0 !important;
+    padding: 0 2px !important;
+    font-variant-numeric: tabular-nums !important;
 }
 
 /* Custom Netflix-style Seekbar & Progress Track */
@@ -192,12 +197,9 @@ html, body {
     flex: 1 !important;
     min-width: 120px !important;
     position: relative !important;
-    display: flex !important;
-    align-items: center !important;
 }
 
 .plyr__progress {
-    width: 100% !important;
     cursor: pointer !important;
     touch-action: none !important;
 }
@@ -213,22 +215,43 @@ html, body {
     color: rgba(255, 255, 255, 0.4) !important;
 }
 
-/* Time display alignment */
-.plyr__time {
-    display: inline-flex !important;
-    align-items: center !important;
-    font-size: 0.82rem !important;
-    font-weight: 600 !important;
-    white-space: nowrap !important;
-    line-height: 1 !important;
+/* Control buttons inside .plyr__controls must always accept clicks */
+.plyr__controls button,
+.plyr__controls input,
+.plyr__controls a {
+    pointer-events: auto !important;
+    cursor: pointer !important;
 }
 
-/* Idle Controls Hiding */
+/* Idle Controls Hiding (Smooth Cinema Mode) */
 .player-root.hide-controls .top-bar,
 .player-root.hide-controls .resume-pill {
     opacity: 0;
     pointer-events: none;
     transform: translateY(-8px);
+}
+
+.player-root.hide-controls .plyr__controls {
+    opacity: 0 !important;
+    pointer-events: none !important;
+    transform: translateY(100%) !important;
+}
+
+/* Hovering over controls or top bar MUST force visibility and clickability */
+.top-bar:hover,
+.plyr__controls:hover,
+.player-root:not(.hide-controls) .plyr__controls,
+.player-root:not(.hide-controls) .top-bar {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+}
+
+.player-root:not(.hide-controls) .plyr__controls {
+    transform: translateY(0) !important;
+}
+
+.player-root:not(.hide-controls) .top-bar {
+    transform: translateY(0) !important;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -321,9 +344,6 @@ html, body {
     letter-spacing: 0.8px;
     color: #e2e8f0;
     flex-shrink: 0;
-    line-height: 1.5;
-    display: inline-flex;
-    align-items: center;
 }
 
 .quality-badge {
@@ -336,9 +356,6 @@ html, body {
     letter-spacing: 0.5px;
     color: #ff4d58;
     flex-shrink: 0;
-    line-height: 1.5;
-    display: inline-flex;
-    align-items: center;
 }
 
 .episode-subtitle {
@@ -631,15 +648,15 @@ html, body {
     flex-direction: column;
     transform: translateX(100%);
     transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
-    overflow: hidden;
 }
 
 .episodes-drawer.open {
     transform: translateX(0);
 }
 
+/* ── Drawer Header ── */
 .drawer-header {
-    padding: 20px 20px 16px;
+    padding: 20px 24px 16px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     display: flex;
     align-items: center;
@@ -658,14 +675,14 @@ html, body {
 }
 
 .drawer-show-title {
-    font-size: 1.2rem;
+    font-size: 1.3rem;
     font-weight: 800;
     color: #ffffff;
     letter-spacing: -0.3px;
+    line-height: 1.2;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    line-height: 1.2;
 }
 
 .season-selector-wrapper {
@@ -680,17 +697,16 @@ html, body {
     color: #ffffff;
     border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 6px;
-    padding: 7px 34px 7px 12px;
+    padding: 8px 36px 8px 14px;
     font-family: 'Outfit', sans-serif;
-    font-size: 0.9rem;
+    font-size: 0.95rem;
     font-weight: 700;
     cursor: pointer;
     outline: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='white' viewBox='0 0 16 16'%3E%3Cpath d='M7.247 11.14L2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
-    background-position: right 10px center;
+    background-position: right 12px center;
     transition: all 0.2s ease;
-    line-height: 1.4;
 }
 
 .season-dropdown:hover,
@@ -707,7 +723,6 @@ html, body {
 .drawer-close-btn {
     width: 36px;
     height: 36px;
-    min-width: 36px;
     border-radius: 50%;
     background: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(255, 255, 255, 0.15);
@@ -719,7 +734,6 @@ html, body {
     cursor: pointer;
     transition: all 0.2s ease;
     flex-shrink: 0;
-    align-self: flex-start;
 }
 
 .drawer-close-btn:hover {
@@ -729,20 +743,20 @@ html, body {
     transform: rotate(90deg);
 }
 
-/* Episodes Cards Container */
+/* ── Episodes Cards Container ── */
 .episodes-cards-container {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 14px 16px 20px;
+    padding: 16px 20px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
 }
 
 /* Custom Scrollbar */
 .episodes-cards-container::-webkit-scrollbar {
-    width: 5px;
+    width: 6px;
 }
 
 .episodes-cards-container::-webkit-scrollbar-track {
@@ -758,47 +772,44 @@ html, body {
     background: #e50914;
 }
 
-/* Individual Episode Card (Netflix / HBO Layout) */
+/* ── Individual Episode Card ── */
 .episode-card {
     display: flex;
     flex-direction: row;
-    align-items: stretch;
-    gap: 12px;
-    padding: 10px;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 12px;
     border-radius: 10px;
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(255, 255, 255, 0.06);
     cursor: pointer;
-    transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
-    text-align: left;
+    transition: all 0.22s ease;
     position: relative;
     overflow: hidden;
-    width: 100%;
-    box-sizing: border-box;
 }
 
 .episode-card:hover {
     background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.18);
-    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.2);
+    transform: translateY(-2px);
 }
 
 .episode-card.active {
     background: rgba(229, 9, 20, 0.1);
-    border-color: rgba(229, 9, 20, 0.6);
-    box-shadow: 0 0 14px rgba(229, 9, 20, 0.25);
+    border-color: #e50914;
+    box-shadow: 0 0 16px rgba(229, 9, 20, 0.35);
 }
 
+/* ── Episode Thumbnail ── */
 .episode-thumb-wrap {
     position: relative;
-    width: 132px;
-    min-width: 132px;
-    height: 74px;
+    width: 140px;
+    min-width: 140px;
+    height: 80px;
     border-radius: 6px;
     overflow: hidden;
     background: #1c1c24;
     flex-shrink: 0;
-    align-self: center;
 }
 
 .episode-thumb {
@@ -830,83 +841,81 @@ html, body {
 }
 
 .play-circle {
-    width: 30px;
-    height: 30px;
+    width: 32px;
+    height: 32px;
     border-radius: 50%;
     background: #e50914;
     display: flex;
     align-items: center;
     justify-content: center;
     color: #ffffff;
-    font-size: 0.75rem;
+    font-size: 0.8rem;
     box-shadow: 0 0 10px rgba(0, 0, 0, 0.8);
 }
 
 .episode-runtime-badge {
     position: absolute;
-    bottom: 4px;
-    right: 4px;
+    bottom: 5px;
+    right: 5px;
     padding: 2px 5px;
-    background: rgba(0, 0, 0, 0.8);
+    background: rgba(0, 0, 0, 0.75);
     border-radius: 3px;
-    font-size: 0.65rem;
+    font-size: 0.68rem;
     font-weight: 700;
     color: #e2e8f0;
     line-height: 1;
 }
 
+/* ── Episode Info Block ── */
 .episode-info {
     display: flex;
     flex-direction: column;
-    justify-content: center;
-    gap: 5px;
+    gap: 6px;
     flex: 1;
     min-width: 0;
-    padding: 2px 0;
+    padding-top: 2px;
 }
 
 .episode-title-row {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 6px;
+    gap: 8px;
     min-width: 0;
 }
 
 .episode-num-title {
-    font-size: 0.9rem;
+    font-size: 0.95rem;
     font-weight: 700;
     color: #ffffff;
+    line-height: 1.3;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    line-height: 1.3;
-    min-width: 0;
     flex: 1;
+    min-width: 0;
 }
 
 .active-playing-tag {
-    font-size: 0.62rem;
+    font-size: 0.65rem;
     font-weight: 800;
     color: #e50914;
     letter-spacing: 0.8px;
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    white-space: nowrap;
     flex-shrink: 0;
-    line-height: 1;
+    white-space: nowrap;
 }
 
 .episode-synopsis {
-    font-size: 0.77rem;
-    color: #8899a6;
-    line-height: 1.4;
+    font-size: 0.8rem;
+    color: #94a3b8;
+    line-height: 1.45;
     display: -webkit-box;
-    -webkit-line-clamp: 2;
+    -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
-    margin-top: 1px;
+    word-break: break-word;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -1373,56 +1382,54 @@ input:checked + .slider:before {
 
     .drawer-header {
         padding: max(16px, env(safe-area-inset-top)) 16px 14px;
-        gap: 10px;
     }
 
     .drawer-show-title {
-        font-size: 1.1rem;
+        font-size: 1.15rem;
     }
 
     .season-dropdown {
-        font-size: 0.85rem;
-        padding: 6px 30px 6px 10px;
-        max-width: 200px;
+        font-size: 0.88rem;
+        padding: 6px 32px 6px 12px;
+        max-width: 210px;
     }
 
     .drawer-close-btn {
-        width: 38px;
-        height: 38px;
-        min-width: 38px;
-        font-size: 1.1rem;
+        width: 40px;
+        height: 40px;
+        font-size: 1.2rem;
     }
 
     .episodes-cards-container {
-        padding: 10px 12px calc(env(safe-area-inset-bottom) + 20px);
-        gap: 8px;
+        padding: 12px 14px calc(env(safe-area-inset-bottom) + 24px);
+        gap: 10px;
     }
 
     .episode-card {
-        padding: 8px;
+        padding: 10px;
         gap: 10px;
         border-radius: 8px;
-        align-items: center;
     }
 
     .episode-thumb-wrap {
-        width: 110px;
-        min-width: 110px;
-        height: 62px;
+        width: 105px;
+        min-width: 105px;
+        height: 60px;
     }
 
     .episode-info {
         gap: 4px;
-        justify-content: center;
+        padding-top: 0;
     }
 
     .episode-num-title {
-        font-size: 0.85rem;
+        font-size: 0.88rem;
     }
 
     .episode-synopsis {
-        font-size: 0.73rem;
+        font-size: 0.74rem;
         -webkit-line-clamp: 2;
+        line-height: 1.35;
     }
 
     /* Plyr Controls Mobile Layout */

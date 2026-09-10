@@ -22,8 +22,8 @@ app.use("/stream", streamRoutes);
 
 // Root endpoint: no torrent search page - strictly direct media streaming
 app.get("/", (req, res) => {
-    res.status(404).json({
-        error: "Not Found",
+    res.status(503).json({
+        error: "Service Unavailable",
         message: "Viewlix Media Server: Please access via /movie/:tmdbid or /tv/:tmdbid/:season/:episode"
     });
 });

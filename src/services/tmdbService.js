@@ -236,6 +236,7 @@ async function searchTorrentio(type, id) {
                 id: hash,
                 name: filename,
                 infoHash: hash,
+                fileIdx: typeof s.fileIdx === "number" ? s.fileIdx : undefined,
                 seeders,
                 leechers: 0,
                 size: sizeBytes,
@@ -532,12 +533,11 @@ function getTop3ServersByPeers(results, isEnglishMedia = true) {
         return {
             id: item.infoHash,
             infoHash: item.infoHash,
+            fileIdx: item.fileIdx,
             serverIndex: idx + 1,
             name: item.name,
             quality: item.quality,
-            label: `Server ${idx + 1} (${item.quality})`,
-            streamUrl: `/stream/${item.infoHash}`,
-            transcodeUrl: `/stream/${item.infoHash}?transcode=audio`
+            label: `Server ${idx + 1} (${item.quality})`
         };
     });
 

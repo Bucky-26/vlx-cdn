@@ -44,12 +44,21 @@ async function handleMediaSSE(req, res, getInfo, searchTorrents) {
         const qualitySet = new Set(sources.map((s) => s.quality));
         const qualities = ["4K", "1080p", "720p", "480p"].filter((q) => qualitySet.has(q));
 
+        const publicSources = sources.map((s, idx) => ({
+            id: s.infoHash,
+            infoHash: s.infoHash,
+            serverIndex: idx + 1,
+            label: s.label || `Server ${idx + 1} (${s.quality || "HD"})`,
+            quality: s.quality || "1080p",
+            fileIdx: s.fileIdx
+        }));
+
         send("meta", {
             success: true,
             mediaType: info.mediaType,
             tmdb: info,
-            sources,
-            bestSource,
+            sources: publicSources,
+            bestSource: publicSources[0] || null,
             qualities: qualities.length > 0 ? qualities : ["1080p"],
             currentQuality: bestSource ? bestSource.quality : "1080p",
             totalSources: sources.length
@@ -63,7 +72,12 @@ async function handleMediaSSE(req, res, getInfo, searchTorrents) {
 
         // ── Phase 2: Race ALL sources — first one to connect wins ──────────────
         const durationSec = info.runtime ? info.runtime * 60 : (info.mediaType === "tv" ? 3000 : 7200);
-        const streamPromise = prepareFastest(sources, durationSec);
+        const streamOptions = {
+            season: info.season,
+            episode: info.episode,
+            req
+        };
+        const streamPromise = prepareFastest(sources, durationSec, streamOptions);
 
         // Race: either stream is ready, or client disconnects
         const result = await Promise.race([
@@ -77,7 +91,6 @@ async function handleMediaSSE(req, res, getInfo, searchTorrents) {
             const streamData = result.data;
             send("stream", {
                 ...streamData,
-                infoHash: streamData.infoHash,
                 streamUrl: streamData.streamUrl,
                 transcodeUrl: streamData.transcodeUrl
             });
@@ -177,7 +190,7 @@ async function handleTv(req, res) {
 
         if (bestSource) {
             const durationSec = tv.runtime ? tv.runtime * 60 : 3000;
-            prepareFastest(sources, durationSec).catch((e) => {
+            prepareFastest(sources, durationSec, { season: tv.season, episode: tv.episode }).catch((e) => {
                 console.log("Auto-prepare stream notice:", e.message);
             });
         }
