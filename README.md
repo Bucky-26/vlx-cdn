@@ -1,4 +1,4 @@
-# torrent-player
+# ViewLix CDN [Web Scraper and Aggregator]
 
 Torrent-powered video streaming server with a React admin client, TMDB metadata lookup, and secure playback tickets.
 
